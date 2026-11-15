@@ -27,6 +27,7 @@ Die Tests brauchen kein Internet: sie pingen `127.0.0.1` mit dem echten `ping.ex
 ```
 system-ping.exe                       Fenster öffnen
 system-ping.exe --export-csv <datei>  gespeicherten Verlauf als CSV exportieren und beenden
+system-ping.exe --screenshot <datei.png> [ansicht]  ein Bild der Oberfläche rendern, wie es die Prüfung anfordert (alias: --shot)
 system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart|stats|events|settings)
 system-ping.exe --theme <hell|dunkel>  Aussehen für diese Sitzung überschreiben
 system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausgeben, beenden

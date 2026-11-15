@@ -155,15 +155,73 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Collect actions first to avoid borrow conflicts.
+                    let mut edit_action: Option<fn(&mut App)> = None;
+                    let mut begin_edit_idx: Option<usize> = None;
+
                     for (idx, t) in app.targets.iter().enumerate() {
                         let color = app.status_color(t);
                         let txt = app.status_text(t);
                         let sel = app.selected == idx;
+                        let editing_here = app.edit_idx == Some(idx);
                         let secs_ago = if t.last_probe_secs > 0.0 {
                             now - t.last_probe_secs
                         } else {
                             -1.0
                         };
+
+                        // While a row is being edited, show text fields instead of the label.
+                        if editing_here {
+                            let frame = egui::Frame::new()
+                                .fill(m.row_fill(true))
+                                .corner_radius(5.0)
+                                .inner_margin(egui::Margin::symmetric(7, 5));
+                            frame.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (dot_rect, _) = ui.allocate_exact_size(
+                                        Vec2::splat(11.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    let dot_rect = dot_rect.shrink(1.5);
+                                    ui.painter().rect_filled(dot_rect, 5.5, color);
+
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 3.0;
+                                        // Host field (the important one).
+                                        ui.add_sized(
+                                            [195.0, 22.0],
+                                            egui::TextEdit::singleline(&mut app.edit_host)
+                                                .hint_text("Adresse"),
+                                        );
+                                        // Label field.
+                                        ui.add_sized(
+                                            [195.0, 22.0],
+                                            egui::TextEdit::singleline(&mut app.edit_label)
+                                                .hint_text("Name (optional)"),
+                                        );
+                                        // Commit or cancel buttons.
+                                        ui.horizontal(|ui| {
+                                            if ui.button("✓ Speichern").clicked() {
+                                                edit_action = Some(App::commit_edit);
+                                            }
+                                            if ui.button("✗ Abbrechen").clicked() {
+                                                edit_action = Some(App::cancel_edit);
+                                            }
+                                        });
+                                    });
+                                });
+
+                                // Enter commits, Escape cancels.
+                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                if enter {
+                                    edit_action = Some(App::commit_edit);
+                                } else if escape {
+                                    edit_action = Some(App::cancel_edit);
+                                }
+                            });
+                            continue;
+                        }
 
                         let frame = egui::Frame::new()
                             .fill(m.row_fill(sel))
@@ -214,9 +272,19 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
                             });
                         });
 
-                        if resp.response.clicked() {
+                        if resp.response.double_clicked() {
+                            begin_edit_idx = Some(idx);
+                        } else if resp.response.clicked() {
                             select = Some(idx);
                         }
+                    }
+
+                    // Now apply the actions after the loop, when `app` is no longer borrowed.
+                    if let Some(idx) = begin_edit_idx {
+                        app.begin_edit(idx);
+                    }
+                    if let Some(action) = edit_action {
+                        action(app);
                     }
                 });
 

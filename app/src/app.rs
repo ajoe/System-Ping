@@ -174,6 +174,13 @@ pub struct App {
     pub new_label: String,
     pub filter: String,
 
+    /// The target being edited in the inline editor, if any. Set by double-clicking a row in
+    /// the left panel; cleared when the user commits or cancels. `edit_idx` is the index into
+    /// `targets`, which is safe because the list cannot change while the editor is open.
+    pub edit_idx: Option<usize>,
+    pub edit_host: String,
+    pub edit_label: String,
+
     // Chart interaction
     pub hover_x: Option<f64>,
     pub follow_live: bool,
@@ -458,6 +465,9 @@ impl App {
             new_host: String::new(),
             new_label: String::new(),
             filter: String::new(),
+            edit_idx: None,
+            edit_host: String::new(),
+            edit_label: String::new(),
             hover_x: None,
             follow_live: true,
             pan_offset_secs: 0.0,
@@ -886,6 +896,69 @@ impl App {
         self.new_host = host.to_string();
         self.new_label = label.to_string();
         self.add_target();
+    }
+
+    /// Open the inline editor for the selected target. Called on double-click in the left panel.
+    pub fn begin_edit(&mut self, idx: usize) {
+        if let Some(t) = self.targets.get(idx) {
+            self.edit_idx = Some(idx);
+            self.edit_host = t.host.clone();
+            self.edit_label = t.label.clone();
+        }
+    }
+
+    /// Save the edits made in the inline editor. A changed host restarts that target's probes;
+    /// a changed label only renames it. An empty host reverts to the old one.
+    pub fn commit_edit(&mut self) {
+        let Some(idx) = self.edit_idx else { return };
+        let Some(t) = self.targets.get_mut(idx) else {
+            self.edit_idx = None;
+            return;
+        };
+
+        let new_host = self.edit_host.trim().to_string();
+        if new_host.is_empty() {
+            self.status_msg = String::from("Host darf nicht leer sein — Änderung verworfen.");
+            self.edit_idx = None;
+            return;
+        }
+
+        let old_host = t.host.clone();
+        let host_changed = new_host != old_host;
+        let label_changed = !self.edit_label.trim().is_empty() && self.edit_label.trim() != t.label;
+
+        if host_changed {
+            // Stop the old probes, then restart with the new address.
+            self.engine.stop_target(t.id);
+            self.next_probe_at.remove(&t.id);
+            t.host = new_host.clone();
+            t.kind = classify(&new_host);
+            t.last_rtt = f32::NAN;
+            t.last_probe_secs = f64::NAN;
+            t.streak_bad = 0;
+        }
+
+        if label_changed {
+            t.label = self.edit_label.trim().to_string();
+        }
+
+        self.status_msg = if host_changed && label_changed {
+            format!("{old_host} → {new_host}, umbenannt.")
+        } else if host_changed {
+            format!("{old_host} → {new_host}.")
+        } else if label_changed {
+            format!("Umbenannt zu {}.", t.label)
+        } else {
+            String::from("Keine Änderung.")
+        };
+
+        self.edit_idx = None;
+        self.save_now();
+    }
+
+    /// Discard the inline editor without saving.
+    pub fn cancel_edit(&mut self) {
+        self.edit_idx = None;
     }
 
     pub fn remove_selected(&mut self) {
