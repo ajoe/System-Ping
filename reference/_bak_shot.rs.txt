@@ -1,0 +1,296 @@
+//! Screenshot mode: run the real interface for a fixed number of frames, then save a PNG.
+//!
+//! eframe gives no public way to read back what it drew, so the frame is rasterised
+//! from egui's own draw list (`ClippedPrimitive`s): filled and stroked rectangles,
+//! lines and text galley pixels. No engine internals are touched.
+
+use crate::app::{App, LogKind, View};
+use crate::history::Fail;
+use crate::theme;
+use crate::ui;
+use eframe::CreationContext;
+use egui::epaint::ClippedPrimitive;
+use egui::{Color32, Pos2, Rect, Vec2};
+use image::RgbaImage;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+pub struct Screencap {
+    app: App,
+    path: PathBuf,
+    view: Option<String>,
+    frames_left: u32,
+    last_tick: Instant,
+    done: bool,
+    seeded: usize,
+    /// The last fully drawn frame, taken from egui's own output.
+    shapes: Vec<ClippedPrimitive>,
+    /// Our own monotone clock for egui; see `update`.
+    clock: f64,
+}
+
+/// Arbitrary fixed clock: seeded samples and the egui frame clock both use it, so the
+/// chart window and the frame timestamps line up.
+const T0: f64 = 980.0;
+
+impl Screencap {
+    pub fn new(app: App, cc: &CreationContext<'_>, path: PathBuf, view: Option<String>) -> Self {
+        theme::apply(&cc.egui_ctx);
+        // Fixed surface so the shot is reproducible.
+        cc.egui_ctx.set_pixels_per_point(1.0);
+        Self {
+            app,
+            path,
+            view,
+            frames_left: 120,
+            last_tick: Instant::now(),
+            done: false,
+            seeded: 0,
+            shapes: Vec::new(),
+            clock: 0.0,
+        }
+    }
+
+    /// Feed the app some history so the picture shows a working monitor.
+    /// Returns how many samples were planted (0 = no targets, nothing to draw).
+    fn seed(&mut self) -> usize {
+        use crate::history::{Sample, TIMEOUT};
+        const T0: f64 = 980.0;
+        let n = self.app.targets.len();
+        if n == 0 {
+            return 0;
+        }
+        let horizon = self.app.options.horizon_secs as f64;
+        // A believable trace: a clean baseline, one latency spike per target (kept well
+        // below the chart's own y-scaling so the outlier rings land inside the plot), and
+        // an outage streak on the second target.
+        // A believable trace: a clean baseline, one latency spike per target (kept well
+        // below the chart's own y-scaling so the outlier rings land inside the plot), and
+        // an outage streak on the second target. The last sample sits just under "now" so
+        // every target keeps its newest-value dot in the live window.
+        let n = 110usize;
+        for (i, t) in self.app.targets.iter_mut().enumerate() {
+            // Keep the seeded history inside the configured window.
+            t.series.set_cap(self.app.options.max_samples as usize);
+            for k in 0..n {
+                let base = match i {
+                    0 => 2.4,
+                    1 => 13.0,
+                    2 => 27.0,
+                    _ => 45.0,
+                } + (i as f32 * 1.7);
+                let jitter = (((k as f32 * 12.9898 + i as f32 * 78.233).sin()) * 43758.5453).fract() * base * 0.45;
+                let rtt = if i == 1 && (62..=71).contains(&k) {
+                    TIMEOUT
+                } else if k % 37 == 0 {
+                    base * 2.4 + 25.0
+                } else {
+                    base + jitter
+                };
+                t.series.push(Sample {
+                    t_secs: T0 + (k as f64 + 1.0) * (horizon / n as f64),
+                    rtt_ms: rtt,
+                    fail: if rtt >= TIMEOUT { Some(Fail::Timeout) } else { None },
+                });
+            }
+            let last = t.series.samples().last().map(|s| s.rtt_ms).unwrap_or(0.0);
+            t.last_rtt = last;
+            t.last_probe_secs = T0 + horizon;
+        }
+        self.app.engine.debug_advance(T0 + horizon + 1.0);
+        self.app.log_info("Beispielverlauf geladen (Prüfbild)");
+        self.app.alert_count += 1;
+        self.app.log_event(LogKind::Outage, format!("Ausfall: {}", self.app.targets[1].label));
+        self.app.log_event(LogKind::Recovery, format!("Wieder online: {}", self.app.targets[1].label));
+        n * 110
+    }
+
+    /// Show one of the four views in the shot.
+    fn set_view(&mut self, name: &str) {
+        if let Some(v) = view_for(name) {
+            self.app.view = v;
+        }
+    }
+}
+
+impl eframe::App for Screencap {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.frames_left == 120 {
+            self.seeded = self.seed();
+            if let Some(v) = self.view.take() {
+                self.set_view(&v);
+            }
+        }
+
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_tick).as_secs_f64().min(0.5);
+        self.last_tick = now;
+        // Drive the engine clock so the chart window moves like it does live.
+        self.app.engine.debug_advance(dt);
+
+        // Draw inside a real egui output pass: `tessellate` only sees the last frame that
+        // finished, and with a hidden window there is no vsync to force one. The clock fed
+        // to egui must never move backwards (emath asserts on that), so it is monotone for
+        // this run; T0 just keeps our own timeline in a sane range.
+        let mut raw = egui::RawInput::default();
+        let ours = T0 + (200 - self.frames_left) as f64 * 0.016;
+        let t = if self.clock > 0.0 {
+            self.clock + 0.016
+        } else {
+            ours
+        };
+        self.clock = t;
+        raw.time = Some(t);
+        let out = ctx.run(raw, |c| {
+            ui::top(c, &mut self.app);
+            ui::left(c, &mut self.app);
+            ui::bottom(c, &mut self.app);
+            ui::center(c, &mut self.app);
+        });
+
+        // Keep the tessellated frame: eframe hands its own draw list to glow and never
+        // gives it back, so this is the only copy we can raster ourselves.
+        if !out.shapes.is_empty() {            let ppp = ctx.pixels_per_point();
+            self.shapes = ctx.tessellate(out.shapes, ppp);
+        }
+
+        self.frames_left = self.frames_left.saturating_sub(1);
+
+        if self.frames_left == 0 && !self.done {
+            self.done = true;
+            let path = self.path.clone();
+            match capture(ctx, &self.shapes, &path) {
+                Ok((w, h)) => println!(
+                    "screenshot: {}x{} -> {} (seeded samples: {})",
+                    w,
+                    h,
+                    path.display(),
+                    self.seeded
+                ),
+                Err(e) => eprintln!("screenshot failed: {}", e),
+            }
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+        } else if self.frames_left > 0 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ raster */
+
+fn capture(ctx: &egui::Context, shapes: &[ClippedPrimitive], path: &PathBuf) -> Result<(u32, u32), String> {
+    let size = ctx.input(|i| {
+        i.viewport()
+            .inner_rect
+            .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(1080.0, 700.0)))
+    });
+    let size = size.size();
+    let w = size.x.max(64.0) as u32;
+    let h = size.y.max(64.0) as u32;
+    let mut img = RgbaImage::new(w, h);
+
+    for clipped in shapes {
+        let mesh = match &clipped.primitive {
+            egui::epaint::Primitive::Mesh(m) => m,
+            _ => continue,
+        };
+        paint_mesh(&mut img, mesh, clipped.clip_rect, w, h);
+    }
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    img.save(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok((w, h))
+}
+
+fn paint_mesh(img: &mut RgbaImage, mesh: &egui::epaint::Mesh, clip: Rect, w: u32, h: u32) {
+    for tri in mesh.indices.chunks_exact(3) {
+        let p = |i: usize| -> Pos2 {
+            let v = &mesh.vertices[tri[i] as usize];
+            egui::pos2(v.pos.x, v.pos.y)
+        };
+        let c = |i: usize| -> Color32 { mesh.vertices[tri[i] as usize].color };
+        fill_triangle(img, p(0), p(1), p(2), c(0), c(1), c(2), clip, w, h);
+    }
+}
+
+fn fill_triangle(
+    img: &mut RgbaImage,
+    a: Pos2,
+    b: Pos2,
+    c: Pos2,
+    ca: Color32,
+    cb: Color32,
+    cc: Color32,
+    clip: Rect,
+    w: u32,
+    h: u32,
+) {
+    let lo_x = a.x.min(b.x).min(c.x).max(clip.min.x).max(0.0);
+    let hi_x = a.x.max(b.x).max(c.x).min(clip.max.x).min(w as f32 - 1.0);
+    let lo_y = a.y.min(b.y).min(c.y).max(clip.min.y).max(0.0);
+    let hi_y = a.y.max(b.y).max(c.y).min(clip.max.y).min(h as f32 - 1.0);
+    if hi_x < lo_x || hi_y < lo_y {
+        return;
+    }
+    let min_x = lo_x.floor() as i32;
+    let max_x = hi_x.ceil() as i32;
+    let min_y = lo_y.floor() as i32;
+    let max_y = hi_y.ceil() as i32;
+    if max_x < min_x || max_y < min_y {
+        return;
+    }
+    let d = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    if d.abs() < 1e-6 {
+        return;
+    }
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let w0 = ((b.x - px) * (c.y - py) - (c.x - px) * (b.y - py)) / d;
+            let w1 = ((c.x - px) * (a.y - py) - (a.x - px) * (c.y - py)) / d;
+            let w2 = 1.0 - w0 - w1;
+            if w0 < -0.02 || w1 < -0.02 || w2 < -0.02 {
+                continue;
+            }
+            let r = (w0 * ca.r() as f32 + w1 * cb.r() as f32 + w2 * cc.r() as f32) as u32;
+            let g = (w0 * ca.g() as f32 + w1 * cb.g() as f32 + w2 * cc.g() as f32) as u32;
+            let bl = (w0 * ca.b() as f32 + w1 * cb.b() as f32 + w2 * cc.b() as f32) as u32;
+            let al = (w0 * ca.a() as f32 + w1 * cb.a() as f32 + w2 * cc.a() as f32).clamp(0.0, 255.0) as u32;
+            if al == 0 {
+                continue;
+            }
+            blend(img, x as u32, y as u32, r.min(255) as u8, g.min(255) as u8, bl.min(255) as u8, al as u8);
+        }
+    }
+}
+
+fn blend(img: &mut RgbaImage, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) {
+    if x >= img.width() || y >= img.height() {
+        return;
+    }
+    if a == 255 {
+        img.put_pixel(x, y, image::Rgba([r, g, b, 255]));
+        return;
+    }
+    let p = img.get_pixel_mut(x, y);
+    let af = a as u32;
+    let inv = 255 - af;
+    p.0[0] = ((r as u32 * af + p.0[0] as u32 * inv) / 255) as u8;
+    p.0[1] = ((g as u32 * af + p.0[1] as u32 * inv) / 255) as u8;
+    p.0[2] = ((b as u32 * af + p.0[2] as u32 * inv) / 255) as u8;
+    p.0[3] = 255;
+}
+
+/// Which view a shot should show (`--shot out.png events`).
+pub fn view_for(name: &str) -> Option<View> {
+    match name.to_ascii_lowercase().as_str() {
+        "chart" | "diagramm" => Some(View::Chart),
+        "list" | "liste" | "events" => Some(View::Events),
+        "stats" | "statistik" => Some(View::Stats),
+        "settings" | "einstellungen" => Some(View::Settings),
+        _ => None,
+    }
+}

@@ -1,0 +1,6 @@
+# The MSVC Build Tools (winget install Microsoft.VisualStudio.2022.BuildTools) are the
+# toolchain now: rustup's default host is `stable-x86_64-pc-windows-msvc`, so a plain
+# `cargo build` uses cl.exe/link.exe and needs no override here. The old GNU/`ld.lld`
+# setup lives in config.toml.bak; it can be restored with
+#   cargo build --target x86_64-pc-windows-gnu   (after moving the backup back into place).
+# The GNU linker stubs that config pointed at are now in ../_alt_gnu_stubs.

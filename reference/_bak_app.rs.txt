@@ -1,0 +1,829 @@
+//! Application state, the probe scheduler and the event plumbing.
+
+use crate::exporter;
+use crate::history::{self, is_ok, Fail, Sample, Series, Stats};
+use crate::ping::{ProbeJob, ProbeResult};
+use crate::store;
+use egui::Color32;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+/// Why a probe did not answer, as the app records it. Mirrors
+/// [`crate::ping::ProbeFail`]; see [`crate::history::Fail`].
+pub type ProbeKind = crate::history::Fail;
+
+/// What a target is, and how it should be labelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TargetKind {
+    Gateway,
+    Dns,
+    Internet,
+    Lan,
+    Custom,
+}
+
+impl TargetKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            TargetKind::Gateway => "Gateway",
+            TargetKind::Dns => "DNS",
+            TargetKind::Internet => "Internet",
+            TargetKind::Lan => "LAN-Gerät",
+            TargetKind::Custom => "Eigene",
+        }
+    }
+
+    pub fn all() -> [TargetKind; 5] {
+        [
+            TargetKind::Gateway,
+            TargetKind::Dns,
+            TargetKind::Internet,
+            TargetKind::Lan,
+            TargetKind::Custom,
+        ]
+    }
+}
+
+/// One monitored address.
+pub struct Target {
+    pub id: usize,
+    pub label: String,
+    pub host: String,
+    pub kind: TargetKind,
+    pub enabled: bool,
+    pub series: Series,
+    /// Seconds since start of the last completed probe (NaN = never).
+    pub last_probe_secs: f64,
+    pub last_rtt: f32,
+    pub streak_bad: u32,
+    /// Alert was raised for the current outage (so it fires once).
+    pub alert_raised: bool,
+}
+
+impl Target {
+    fn new(id: usize, label: impl Into<String>, host: impl Into<String>, kind: TargetKind) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            host: host.into(),
+            kind,
+            enabled: true,
+            series: Series::new(2048),
+            last_probe_secs: f64::NAN,
+            last_rtt: f32::NAN,
+            streak_bad: 0,
+            alert_raised: false,
+        }
+    }
+}
+
+/// User-facing settings. All persisted.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AppOptions {
+    /// Seconds between probes for every target.
+    pub interval_secs: f32,
+    /// Per-probe timeout in ms.
+    pub timeout_ms: u32,
+    /// How many probes may run at the same time.
+    pub concurrency: usize,
+    /// Chart window width in seconds.
+    pub horizon_secs: f32,
+    /// Max samples kept per target.
+    pub max_samples: usize,
+    pub sound_alerts: bool,
+    pub system_tray_icon: bool,
+    pub autostart: bool,
+    pub minimised_to_tray: bool,
+}
+
+impl Default for AppOptions {
+    fn default() -> Self {
+        Self {
+            interval_secs: 1.0,
+            timeout_ms: 2000,
+            concurrency: 4,
+            horizon_secs: 60.0,
+            max_samples: 2048,
+            sound_alerts: false,
+            system_tray_icon: true,
+            autostart: false,
+            minimised_to_tray: false,
+        }
+    }
+}
+
+/// What the main area shows. `Events` is the status list (live rows per target).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Chart,
+    Events,
+    Stats,
+    Settings,
+}
+
+impl View {
+    pub fn label(&self) -> &'static str {
+        match self {
+            View::Chart => "Diagramm",
+            View::Events => "Ereignisse",
+            View::Stats => "Statistik",
+            View::Settings => "Einstellungen",
+        }
+    }
+
+    pub fn hint(&self) -> &'static str {
+        match self {
+            View::Chart => "Latenzverlauf als Kurve, mit Ausreißern markiert",
+            View::Events => "Statusliste und Ereignisprotokoll",
+            View::Stats => "Kennzahlen je Ziel",
+            View::Settings => "Intervall, Zeitfenster, Export",
+        }
+    }
+}
+
+pub struct App {
+    pub options: AppOptions,
+    pub targets: Vec<Target>,
+    pub selected: usize,
+    pub view: View,
+    pub running: bool,
+    pub engine: crate::ping::PingEngine,
+    pub started_wall: chrono::DateTime<chrono::Local>,
+
+    // UI text buffers
+    pub new_host: String,
+    pub new_label: String,
+    pub filter: String,
+
+    // Chart interaction
+    pub hover_x: Option<f64>,
+    pub follow_live: bool,
+    pub pan_offset_secs: f64,
+
+    // Log of notable events (outages, recoveries).
+    pub log: Vec<LogEntry>,
+    pub log_total: usize,
+    pub alert_count: usize,
+
+    // Scheduling bookkeeping
+    next_probe_at: BTreeMap<usize, f64>,
+    last_tick_secs: f64,
+    pub save_due_secs: f64,
+
+    // Background work handoff
+    pending_export: Arc<AtomicBool>,
+    export_result: Arc<MutexSlot<String>>,
+    pub autostart_state: Arc<AtomicUsize>,
+
+    pub status_msg: String,
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::ui::draw(ctx, self);    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_now();
+    }
+}
+
+/// Tiny slot for a background result (string payload).
+pub struct MutexSlot<T> {
+    inner: std::sync::Mutex<Option<T>>,
+}
+impl<T> MutexSlot<T> {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(None),
+        }
+    }
+    pub fn take(&self) -> Option<T> {
+        self.inner.lock().ok().and_then(|mut o| o.take())
+    }
+    pub fn put(&self, v: T) {
+        if let Ok(mut o) = self.inner.lock() {
+            *o = Some(v);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub secs: f64,
+    pub text: String,
+    pub kind: LogKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogKind {
+    Outage,
+    Recovery,
+    Info,
+}
+
+impl App {
+    pub fn new(options: AppOptions, saved: Vec<store::SavedTarget>) -> Self {
+        let engine = crate::ping::PingEngine::new(options.concurrency);
+        let mut app = Self {
+            options,
+            targets: Vec::new(),
+            selected: 0,
+            view: View::Chart,
+            running: false,
+            engine,
+            started_wall: chrono::Local::now(),
+            new_host: String::new(),
+            new_label: String::new(),
+            filter: String::new(),
+            hover_x: None,
+            follow_live: true,
+            pan_offset_secs: 0.0,
+            log: Vec::new(),
+            log_total: 0,
+            alert_count: 0,
+            next_probe_at: BTreeMap::new(),
+            last_tick_secs: 0.0,
+            save_due_secs: 8.0,
+            pending_export: Arc::new(AtomicBool::new(false)),
+            export_result: Arc::new(MutexSlot::new()),
+            autostart_state: Arc::new(AtomicUsize::new(usize::MAX)),
+            status_msg: String::from("Bereit. Ziel hinzufügen und mit „Start“ die Messung beginnen."),
+        };
+
+        if saved.is_empty() {
+            app.targets = default_targets();
+        } else {
+            let mut next_id = 0usize;
+            for t in saved {
+                let id = next_id;
+                next_id += 1;
+                let mut tgt = Target::new(id, t.label, t.host, t.kind);
+                tgt.enabled = t.enabled;
+                for (secs, rtt) in &t.samples {
+                    tgt.series.push(Sample {
+                        t_secs: *secs,
+                        rtt_ms: *rtt,
+                        fail: None,
+                    });
+                }
+                if let Some(last) = tgt.series.samples().last() {
+                    tgt.last_probe_secs = last.t_secs;
+                    tgt.last_rtt = last.rtt_ms;
+                }
+                app.targets.push(tgt);
+            }
+        }
+        for t in &app.targets {
+            let _ = t.id;
+        }
+        app.sync_caps();
+        app
+    }
+
+    pub fn sync_caps(&mut self) {
+        let cap = self.options.max_samples as usize;
+        for t in &mut self.targets {
+            t.series.set_cap(cap);
+        }
+    }
+
+    pub fn selected_target(&self) -> Option<&Target> {
+        self.targets.get(self.selected)
+    }
+
+    pub fn next_probe_secs(&self, id: usize) -> f64 {
+        self.next_probe_at.get(&id).copied().unwrap_or(0.0)
+    }
+
+    /// Probe every enabled target as fast as the interval and timeout allow.
+    pub fn tick(&mut self, now_secs: f64) {
+        // Drain results first so state stays fresh even while paused.
+        let results = self.engine.drain_results();
+        for r in results {
+            self.apply_result(r);
+        }
+
+        if !self.running {
+            return;
+        }
+
+        // A probe must never overlap its own timeout, or samples arrive doubled.
+        let min_gap = (self.options.interval_secs as f64)
+            .max((self.options.timeout_ms as f64 / 1000.0) + 0.25);
+
+        let mut jobs: Vec<ProbeJob> = Vec::new();
+        for t in &mut self.targets {
+            if !t.enabled {
+                continue;
+            }
+            let due = self.next_probe_at.get(&t.id).copied().unwrap_or(0.0);
+            if now_secs >= due {
+                jobs.push(ProbeJob {
+                    id: t.id,
+                    host: t.host.clone(),
+                    timeout_ms: self.options.timeout_ms,
+                });
+                self.next_probe_at.insert(t.id, now_secs + min_gap);
+            }
+        }
+        for j in jobs {
+            self.engine.start(j);
+        }
+
+        // Periodic housekeeping + autosave.
+        if now_secs - self.last_tick_secs > 1.0 {
+            self.last_tick_secs = now_secs;
+            let horizon = self.options.horizon_secs as f64 * 3.0 + 30.0;
+            for t in &mut self.targets {
+                t.series.trim_to_window(horizon);
+            }
+        }
+        if now_secs >= self.save_due_secs {
+            self.save_due_secs = now_secs + 8.0;
+            self.save_now();
+        }
+    }
+
+    fn apply_result(&mut self, r: ProbeResult) {
+        let Some(idx) = self.targets.iter().position(|t| t.id == r.id) else {
+            return;
+        };
+        // Sample times are on the app clock so the chart x axis is continuous.
+        let t_secs = self.engine.elapsed_secs();
+        let _ = r.t_secs;
+
+        // Work out what to log first, then write it without holding two &mut borrows.
+        enum Act {
+            None,
+            Recovery(String),
+            Outage(String),
+        }
+        let mut act = Act::None;
+        {
+            let t = &mut self.targets[idx];
+            let fail = r.fail.map(Fail::from);
+            t.series.record(t_secs, r.rtt_ms, fail);
+            t.last_probe_secs = t_secs;
+            t.last_rtt = r.rtt_ms;
+
+            if is_ok(r.rtt_ms) {
+                if t.streak_bad > 0 && self.options.sound_alerts {
+                    act = Act::Recovery(format!(
+                        "{} ist wieder erreichbar ({} ms).",
+                        t.label,
+                        fmt_ms(r.rtt_ms)
+                    ));
+                }
+                t.streak_bad = 0;
+                t.alert_raised = false;
+            } else {
+                t.streak_bad += 1;
+                if t.streak_bad >= 2 && !t.alert_raised {
+                    t.alert_raised = true;
+                    let why = match fail {
+                        Some(Fail::Resolve) => "DNS schlägt fehl",
+                        Some(Fail::Error) => "Ping-Fehler",
+                        _ => "Timeout",
+                    };
+                    act = Act::Outage(format!("{} antwortet nicht ({}).", t.label, why));
+                }
+            }
+        }
+        match act {
+            Act::None => {}
+            Act::Recovery(text) => self.push_log(t_secs, text, LogKind::Recovery),
+            Act::Outage(text) => {
+                self.alert_count += 1;
+                self.push_log(t_secs, text, LogKind::Outage);
+            }
+        }
+    }
+
+    fn push_log(&mut self, secs: f64, text: String, kind: LogKind) {
+        if !secs.is_finite() || secs <= 0.0 {
+            return;
+        }
+        self.log_total += 1;
+        self.log.push(LogEntry { secs, text, kind });
+        if self.log.len() > 400 {
+            let cut = self.log.len() - 300;
+            self.log.drain(0..cut);
+        }
+    }
+
+    /// Convenience for UI/screenshot code that only has a message.
+    pub fn log_info(&mut self, text: impl Into<String>) {
+        let secs = self.engine.elapsed_secs();
+        self.push_log(secs, text.into(), LogKind::Info);
+    }
+
+    /// Convenience for UI/screenshot code (outage / recovery lines).
+    pub fn log_event(&mut self, kind: LogKind, text: impl Into<String>) {
+        let secs = self.engine.elapsed_secs();
+        if kind == LogKind::Outage {
+            self.alert_count += 1;
+        }
+        self.push_log(secs, text.into(), kind);
+    }
+
+    /// Seconds since the app started (the chart's x axis).
+    pub fn now_secs(&self) -> f64 {
+        self.engine.elapsed_secs()
+    }
+
+    /// Jumps the chart window onto the next sample above its target's outlier cut,
+    /// starting after the visible window: where the next outlier occurred.
+    pub fn jump_to_next_outlier(&mut self) {
+        let horizon = self.options.horizon_secs as f64;
+        let now = self.engine.elapsed_secs();
+        let t_max = now - self.pan_offset_secs;
+        self.seek_outlier(now, horizon, t_max + 1.0, true);
+    }
+
+    pub fn jump_to_prev_outlier(&mut self) {
+        let horizon = self.options.horizon_secs as f64;
+        let now = self.engine.elapsed_secs();
+        let t_min = now - self.pan_offset_secs - horizon;
+        self.seek_outlier(now, horizon, t_min - 1.0, false);
+    }
+
+    pub fn seek_outlier(&mut self, now: f64, horizon: f64, from: f64, forward: bool) {
+        let mut best: Option<f64> = None;
+        // The cut is per target and over all its stored samples, so work it out once each.
+        let cuts: Vec<(f64, Vec<f64>)> = self
+            .targets
+            .iter()
+            .filter(|t| t.series.len() > 0)
+            .map(|t| {
+                let (cut, _n) = history::outlier_cut(t.series.samples());
+                (
+                    cut,
+                    t.series
+                        .samples()
+                        .iter()
+                        .filter(|s| history::is_ok(s.rtt_ms) && (s.rtt_ms as f64) > cut)
+                        .map(|s| s.t_secs)
+                        .collect(),
+                )
+            })
+            .filter(|(cut, _)| cut.is_finite())
+            .collect();
+
+        for (_cut, times) in cuts {
+            for t_secs in times {
+                let candidate = if forward { t_secs >= from } else { t_secs <= from };
+                if !candidate {
+                    continue;
+                }
+                match best {
+                    Some(b) => {
+                        if (t_secs - from).abs() < (b - from).abs() {
+                            best = Some(t_secs);
+                        }
+                    }
+                    None => best = Some(t_secs),
+                }
+            }
+        }
+        match best {
+            Some(t) => {
+                self.pan_offset_secs = (now - t - horizon * 0.5).clamp(0.0, now.max(0.0));
+                self.follow_live = self.pan_offset_secs < 0.5;
+            }
+            None => self.log_info("keine Auffälligkeiten in den gespeicherten Daten"),
+        }
+    }
+
+    pub fn start(&mut self) {
+        self.running = true;
+        // Stagger the first probes so a big list doesn't fire all at once.
+        let now = self.engine.elapsed_secs();
+        for (i, t) in self.targets.iter().enumerate() {
+            if t.enabled {
+                self.next_probe_at
+                    .insert(t.id, now + (i as f64 * 0.12).min(1.5));
+            }
+        }
+        self.status_msg = String::from("Messung läuft.");
+    }
+
+    pub fn stop(&mut self) {
+        self.running = false;
+        self.engine.stop_all();
+        self.status_msg = String::from("Messung angehalten.");
+    }
+
+    pub fn add_target(&mut self) {
+        let host = self.new_host.trim().to_string();
+        if host.is_empty() {
+            self.status_msg = String::from("Bitte eine Adresse eingeben (z. B. 192.168.1.1).");
+            return;
+        }
+        let label = if self.new_label.trim().is_empty() {
+            guess_label(&host)
+        } else {
+            self.new_label.trim().to_string()
+        };
+        let id = self.targets.iter().map(|t| t.id + 1).max().unwrap_or(0);
+        let kind = classify(&host);
+        self.targets.push(Target::new(id, label, host.clone(), kind));
+        self.new_host.clear();
+        self.new_label.clear();
+        self.selected = self.targets.len() - 1;
+        self.status_msg = format!("{host} wurde hinzugefügt.");
+    }
+
+    /// Add a target with an explicit label (used by the quick-pick buttons).
+    pub fn add_named_target(&mut self, host: &str, label: &str) {
+        self.new_host = host.to_string();
+        self.new_label = label.to_string();
+        self.add_target();
+    }
+
+    pub fn remove_selected(&mut self) {
+        if self.targets.is_empty() {
+            return;
+        }
+        let i = self.selected.min(self.targets.len() - 1);
+        let t = &self.targets[i];
+        self.engine.stop_target(t.id);
+        self.next_probe_at.remove(&t.id);
+        let label = t.label.clone();
+        self.targets.remove(i);
+        if self.selected >= self.targets.len() {
+            self.selected = self.targets.len().saturating_sub(1);
+        }
+        self.status_msg = format!("{label} wurde entfernt.");
+    }
+
+    pub fn reset_stats(&mut self) {
+        for t in &mut self.targets {
+            t.series = Series::new(self.options.max_samples);
+            t.last_rtt = f32::NAN;
+            t.last_probe_secs = f64::NAN;
+            t.streak_bad = 0;
+        }
+        self.log.clear();
+        self.log_total = 0;
+        self.alert_count = 0;
+        self.status_msg = String::from("Messwerte gelöscht.");
+    }
+
+    pub fn export_csv(&mut self, path: PathBuf) {
+        if self.pending_export.load(Ordering::Acquire) {
+            self.status_msg = String::from("Export läuft bereits …");
+            return;
+        }
+        let mut rows = Vec::new();
+        for t in &self.targets {
+            rows.extend(exporter::collect_rows(&t.label, &t.series, self.started_wall));
+        }
+        if rows.is_empty() {
+            self.status_msg = String::from("Es gibt noch keine Messwerte zum Exportieren.");
+            return;
+        }
+        self.pending_export.store(true, Ordering::Release);
+        let flag = Arc::clone(&self.pending_export);
+        let slot = Arc::clone(&self.export_result);
+        std::thread::spawn(move || {
+            let msg = match exporter::write_csv(&path, &rows) {
+                Ok(n) => format!("CSV-Export geschrieben: {} Messwerte.", n),
+                Err(e) => e,
+            };
+            slot.put(msg);
+            flag.store(false, Ordering::Release);
+        });
+        self.status_msg = String::from("Schreibe CSV-Datei …");
+    }
+
+    pub fn take_export_result(&mut self) {
+        if let Some(msg) = self.export_result.take() {
+            self.status_msg = msg;
+        }
+    }
+
+    /// Ask the background thread whether the autostart entry exists.
+    pub fn poll_autostart(&mut self) {
+        let v = self.autostart_state.load(Ordering::Acquire);
+        if v == usize::MAX {
+            return;
+        }
+        // Read once and reset.
+        self.autostart_state.store(usize::MAX, Ordering::Release);
+        let wanted = self.options.autostart;
+        let found = v == 1;
+        if wanted != found {
+            self.options.autostart = found;
+            self.status_msg = if found {
+                String::from("Autostart ist aktiv (Windows-Registry).")
+            } else {
+                String::from("Autostart ist deaktiviert.")
+            };
+        }
+    }
+
+    /// `Some(true)` / `Some(false)` once the registry has answered, `None` while
+    /// the check is still running.
+    pub fn autostart_state(&self) -> Option<bool> {
+        match self.autostart_state.load(Ordering::Acquire) {
+            usize::MAX => None,
+            v => Some(v == 1),
+        }
+    }
+
+    pub fn set_autostart(&mut self, on: bool) {
+        self.options.autostart = on;
+        let slot = Arc::clone(&self.autostart_state);
+        std::thread::spawn(move || {
+            let ok = set_autostart(on);
+            slot.store(if ok { 1 } else { 0 }, Ordering::Release);
+        });
+    }
+
+    pub fn save_now(&mut self) {
+        let saved: Vec<store::SavedTarget> = self
+            .targets
+            .iter()
+            .map(|t| store::SavedTarget {
+                label: t.label.clone(),
+                host: t.host.clone(),
+                kind: t.kind,
+                enabled: t.enabled,
+                samples: t
+                    .series
+                    .samples()
+                    .iter()
+                    .map(|s| (s.t_secs, s.rtt_ms))
+                    .collect(),
+            })
+            .collect();
+        let _ = store::save(&self.options, &saved);
+    }
+
+    pub fn stats_of(&self, id: usize) -> Option<Stats> {
+        let horizon = self.options.horizon_secs as f64;
+        self.targets
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.series.stats(horizon))
+    }
+
+    pub fn visible_targets(&self) -> Vec<usize> {
+        let f = self.filter.trim().to_lowercase();
+        self.targets
+            .iter()
+            .filter(|t| {
+                f.is_empty()
+                    || t.label.to_lowercase().contains(&f)
+                    || t.host.to_lowercase().contains(&f)
+            })
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Colour a status dot.
+    pub fn status_color(&self, t: &Target) -> Color32 {
+        if !t.enabled {
+            return Color32::from_rgb(90, 96, 108);
+        }
+        if t.last_rtt.is_nan() {
+            return if self.running {
+                Color32::from_rgb(120, 170, 240)
+            } else {
+                Color32::from_rgb(90, 96, 108)
+            };
+        }
+        history::rtt_color(t.last_rtt)
+    }
+
+    pub fn status_text(&self, t: &Target) -> String {
+        if !t.enabled {
+            return "pausiert".into();
+        }
+        if t.last_rtt.is_nan() {
+            return if self.running { "wartet …".into() } else { "—".into() };
+        }
+        if is_ok(t.last_rtt) {
+            format!("{} ms", fmt_ms(t.last_rtt))
+        } else {
+            "Timeout".into()
+        }
+    }
+}
+
+pub fn fmt_ms(v: f32) -> String {
+    if v >= 100.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+fn default_targets() -> Vec<Target> {
+    vec![
+        Target::new(0, "Gateway", gateway_hint(), TargetKind::Gateway),
+        Target::new(1, "DNS (Google)", "8.8.8.8", TargetKind::Dns),
+        Target::new(2, "Internet", "1.1.1.1", TargetKind::Internet),
+    ]
+}
+
+/// Best-effort default gateway from `ipconfig` / `route`; falls back to the
+/// common home-router address. Never blocks longer than a second.
+fn gateway_hint() -> String {
+    #[cfg(windows)]
+    {
+        if let Some(g) = windows_gateway() {
+            return g;
+        }
+    }
+    String::from("192.168.1.1")
+}
+
+#[cfg(windows)]
+fn windows_gateway() -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new("route");
+    cmd.args(["print", "0.0.0.0"]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
+    let out = cmd.output().ok()?;
+    let text: String = String::from_utf8_lossy(&out.stdout).to_string();
+    for line in text.lines() {
+        let l = line.trim();
+        if !l.starts_with("0.0.0.0") {
+            continue;
+        }
+        // Columns differ by language; the gateway is a dotted quad that is not
+        // the netmask (which is 0.0.0.0 or 255.*).
+        let mut ips: Vec<String> = Vec::new();
+        for tok in l.split_whitespace() {
+            if tok.matches('.').count() == 3 && tok.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                ips.push(tok.to_string());
+            }
+        }
+        for ip in ips.iter().skip(2) {
+            if !ip.starts_with("0.") && !ip.starts_with("255.") {
+                return Some(ip.clone());
+            }
+        }
+    }
+    None
+}
+
+fn guess_label(host: &str) -> String {
+    match classify(host) {
+        TargetKind::Gateway => "Gateway".into(),
+        _ => host.to_string(),
+    }
+}
+
+fn classify(host: &str) -> TargetKind {
+    if host.starts_with("192.168.") || host.starts_with("10.") || host.starts_with("172.") {
+        if host.ends_with(".1") || host.ends_with(".254") {
+            return TargetKind::Gateway;
+        }
+        return TargetKind::Lan;
+    }
+    if host == "8.8.8.8" || host == "1.1.1.1" || host.contains("dns") {
+        return TargetKind::Dns;
+    }
+    TargetKind::Custom
+}
+
+/// Write or remove the HKCU Run entry that starts the app at logon.
+fn set_autostart(on: bool) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let exe = exe.display().to_string();
+        let mut cmd = std::process::Command::new("reg");
+        if on {
+            cmd.args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"]);
+            cmd.args(["/v", "SystemPing", "/t", "REG_SZ", "/d"]);
+            cmd.arg(format!("\"{exe}\""));
+            cmd.arg("/f");
+        } else {
+            cmd.args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "SystemPing",
+                "/f",
+            ]);
+        }
+        cmd.creation_flags(0x0800_0000);
+        return cmd.status().map(|s| s.success()).unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on;
+        false
+    }
+}
