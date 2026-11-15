@@ -1,0 +1,30 @@
+# Build output
+/target
+app/target/
+
+# Einmalige Diagnose-Skripte und Build-Mitschnitte aus der Toolchain-Bastelei
+cbn*.ps1
+tail*.ps1
+cfg.txt
+libchk.txt
+liblist.txt
+marker.txt
+e85.txt
+v4.txt
+b56.log
+build-activity.log
+*.log
+
+# Werkzeug-Kram der Aufräum-/Investigations-Sessions
+_trash/
+checks/
+inbox/
+investigation.cany/
+craft.json
+feed.json
+transcript.json
+usage.json
+
+# Zustand, den das Programm selbst neben der Binary schreibt
+system-ping-state.json
+protocol.csv
