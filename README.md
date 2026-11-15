@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 7 Unit-Tests + 13 Integrationstests (ohne GUI)
+cargo test                   # 7 Unit-Tests + 22 Integrationstests (ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -28,15 +28,16 @@ Die Tests brauchen kein Internet: sie pingen `127.0.0.1` mit dem echten `ping.ex
 system-ping.exe                       Fenster öffnen
 system-ping.exe --export-csv <datei>  gespeicherten Verlauf als CSV exportieren und beenden
 system-ping.exe --screenshot <datei.png> [ansicht]  ein Bild der Oberfläche rendern, wie es die Prüfung anfordert (alias: --shot)
-system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart|stats|events|settings)
+system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart|stats|events|settings|edit)
 system-ping.exe --theme <hell|dunkel>  Aussehen für diese Sitzung überschreiben
 system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausgeben, beenden
 ```
 
 Ziele werden über das Einstellungsfeld angelegt (Name + Host). Der Standard-Gateway wird
-beim ersten Start aus `ipconfig`/`route` geraten. Ein **Doppelklick** auf ein Ziel in der
-linken Liste öffnet den Inline-Editor: Host und Name lassen sich ändern, Enter speichert,
-Escape verwirft.
+beim ersten Start aus `ipconfig`/`route` geraten. Ein **Klick** auf ein Ziel in der
+linken Liste öffnet den Inline-Editor: Name, Adresse, Kategorie und ob gemessen wird. Enter
+oder „✓ Speichern“ übernimmt, Escape oder „✗ Abbrechen“ verwirft. Der Editor zeigt außerdem
+die Details des Ziels (Messwerte, ø, min/max, Verluste im sichtbaren Zeitfenster).
 
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der

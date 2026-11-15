@@ -132,9 +132,13 @@ fn main() -> eframe::Result<()> {
                     theme_override.as_deref(),
                 );
                 system_ping::theme::apply(&cc.egui_ctx, a.theme_mode);
-                Ok(Box::new(system_ping::screenshot::Screencap::new(
-                    a, cc, path, view,
-                )))
+                let edit_row = view
+                    .as_deref()
+                    .filter(|v| system_ping::screenshot::wants_edit(v))
+                    .map(|_| 0);
+                let mut cap = system_ping::screenshot::Screencap::new(a, cc, path, view);
+                cap.show_editor(edit_row);
+                Ok(Box::new(cap))
             }),
         ),
         None => eframe::run_native(

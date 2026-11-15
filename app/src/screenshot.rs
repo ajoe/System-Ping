@@ -39,6 +39,9 @@ pub struct Screencap {
     clock: f64,
     /// 1 = the seeded example history stands in for a live trace (see `ui::chart`).
     pub shot_frame: bool,
+    /// Open the inline editor of this target in the picture, so the edit UI can be checked
+    /// without clicking by hand. `None` leaves every row as a plain label.
+    edit_row: Option<usize>,
 }
 
 impl Screencap {
@@ -60,6 +63,7 @@ impl Screencap {
             seeded: 0,
             shapes: Vec::new(),
             shot_frame: false,
+            edit_row: None,
             last_egui_time: 0.0,
             clock: 0.0,
         }
@@ -146,6 +150,11 @@ impl Screencap {
             self.app.view = v;
         }
     }
+
+    /// Open the editor of one target in the picture (see `wants_edit`).
+    pub fn show_editor(&mut self, row: Option<usize>) {
+        self.edit_row = row;
+    }
 }
 
 impl eframe::App for Screencap {
@@ -156,6 +165,10 @@ impl eframe::App for Screencap {
             self.seeded = self.seed();
             if let Some(v) = self.view.take() {
                 self.set_view(&v);
+            }
+            // `--shot out.png edit` shows the inline editor of the first target.
+            if self.edit_row == Some(0) {
+                self.app.begin_edit(0);
             }
         }
 
@@ -473,6 +486,13 @@ pub fn view_for(name: &str) -> Option<View> {
         "list" | "liste" | "events" => Some(View::Events),
         "stats" | "statistik" => Some(View::Stats),
         "settings" | "einstellungen" => Some(View::Settings),
+        // Not a view: keeps the chart, but opens the editor of the first target.
+        "edit" | "bearbeiten" => None,
         _ => None,
     }
+}
+
+/// Whether a shot argument asks for the inline editor to be open in the picture.
+pub fn wants_edit(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "edit" | "bearbeiten")
 }

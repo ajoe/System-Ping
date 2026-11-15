@@ -174,12 +174,17 @@ pub struct App {
     pub new_label: String,
     pub filter: String,
 
-    /// The target being edited in the inline editor, if any. Set by double-clicking a row in
-    /// the left panel; cleared when the user commits or cancels. `edit_idx` is the index into
-    /// `targets`, which is safe because the list cannot change while the editor is open.
+    /// The target being edited in the inline editor, if any. Set by clicking a row in the left
+    /// panel; cleared when the user commits or cancels. `edit_idx` is the index into `targets`,
+    /// which is safe because the list cannot change while the editor is open — `add_target` and
+    /// `remove_selected` refuse to touch the list while something is being edited.
     pub edit_idx: Option<usize>,
     pub edit_host: String,
     pub edit_label: String,
+    /// Category picked in the editor. Normally filled in by `classify`, but it can be overridden.
+    pub edit_kind: TargetKind,
+    /// Whether this target is measured. Turning it off pauses probing without deleting history.
+    pub edit_enabled: bool,
 
     // Chart interaction
     pub hover_x: Option<f64>,
@@ -468,6 +473,8 @@ impl App {
             edit_idx: None,
             edit_host: String::new(),
             edit_label: String::new(),
+            edit_kind: TargetKind::Custom,
+            edit_enabled: true,
             hover_x: None,
             follow_live: true,
             pan_offset_secs: 0.0,
@@ -871,6 +878,12 @@ impl App {
     }
 
     pub fn add_target(&mut self) {
+        // The editor keeps its target by index, so the list must not grow underneath it.
+        if self.edit_idx.is_some() {
+            self.status_msg =
+                String::from("Zuerst die laufende Bearbeitung abschließen oder abbrechen.");
+            return;
+        }
         let host = self.new_host.trim().to_string();
         if host.is_empty() {
             self.status_msg = String::from("Bitte eine Adresse eingeben (z. B. 192.168.1.1).");
@@ -898,12 +911,28 @@ impl App {
         self.add_target();
     }
 
-    /// Open the inline editor for the selected target. Called on double-click in the left panel.
+    /// Open the inline editor for a target. Called when a row in the left panel is clicked, so a
+    /// single click is enough to reach the settings. Any row that was being edited is committed
+    /// first, otherwise switching rows would silently throw away what the user typed.
     pub fn begin_edit(&mut self, idx: usize) {
+        if self.edit_idx.is_some() {
+            self.commit_edit();
+        }
         if let Some(t) = self.targets.get(idx) {
+            self.selected = idx;
             self.edit_idx = Some(idx);
             self.edit_host = t.host.clone();
             self.edit_label = t.label.clone();
+            self.edit_kind = t.kind;
+            self.edit_enabled = t.enabled;
+        }
+    }
+
+    /// Close the editor and commit what is in it. Used when the user clicks a second target, so
+    /// edits are never lost by switching rows.
+    pub fn close_edit(&mut self) {
+        if self.edit_idx.is_some() {
+            self.commit_edit();
         }
     }
 
@@ -926,6 +955,7 @@ impl App {
         let old_host = t.host.clone();
         let host_changed = new_host != old_host;
         let label_changed = !self.edit_label.trim().is_empty() && self.edit_label.trim() != t.label;
+        let was_enabled = t.enabled;
 
         if host_changed {
             // Stop the old probes, then restart with the new address.
@@ -942,12 +972,37 @@ impl App {
             t.label = self.edit_label.trim().to_string();
         }
 
+        // The category is automatic, but an explicit choice wins: the picker in the editor lets
+        // a user relabel a device that `classify` cannot recognise.
+        if !host_changed && self.edit_kind != t.kind {
+            t.kind = self.edit_kind;
+        }
+
+        // Pausing stops the running probe and drops the schedule entry; enabling puts the target
+        // back into the rotation on the next tick.
+        if self.edit_enabled != was_enabled {
+            t.enabled = self.edit_enabled;
+            if !self.edit_enabled {
+                self.engine.stop_target(t.id);
+                self.next_probe_at.remove(&t.id);
+            } else if self.running {
+                let now = self.engine.elapsed_secs();
+                self.next_probe_at.insert(t.id, now);
+            }
+        }
+
         self.status_msg = if host_changed && label_changed {
             format!("{old_host} → {new_host}, umbenannt.")
         } else if host_changed {
             format!("{old_host} → {new_host}.")
         } else if label_changed {
             format!("Umbenannt zu {}.", t.label)
+        } else if t.enabled != was_enabled {
+            if t.enabled {
+                format!("{} wird wieder gemessen.", t.label)
+            } else {
+                format!("{} pausiert.", t.label)
+            }
         } else {
             String::from("Keine Änderung.")
         };
@@ -963,6 +1018,12 @@ impl App {
 
     pub fn remove_selected(&mut self) {
         if self.targets.is_empty() {
+            return;
+        }
+        // Removing a row would shift the index the editor points at.
+        if self.edit_idx.is_some() {
+            self.status_msg =
+                String::from("Zuerst die laufende Bearbeitung abschließen oder abbrechen.");
             return;
         }
         let i = self.selected.min(self.targets.len() - 1);
