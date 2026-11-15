@@ -15,6 +15,7 @@ serde_json = "1"
 # Zeitstempel fuer Protokoll/CSV: nur clock+std, ohne zh-lc_time (das zieht icu_* nach
 # sich - und ein einziger Build-Linkfehler dort stoppt sonst den ganzen Aufbau).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rfd = { version = "0.18.0", default-features = false }
 
 [profile.release]
 opt-level = 2

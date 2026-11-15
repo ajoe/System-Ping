@@ -66,11 +66,46 @@ impl Clone for SavedTarget {
     }
 }
 
+/// Where the window was last time. Deliberately our own small struct instead of
+/// `egui_winit::WindowSettings`: that one keeps its fields private, so we can only build it from
+/// a live winit window — but this file must also be writable (and readable) from tests and from a
+/// headless pass, where no window exists. The numbers are the same ones egui-winit uses: inner
+/// position in physical pixels, inner size in logical points.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WindowGeom {
+    /// Top-left of the window content (not the title bar), in physical pixels.
+    pub x: i32,
+    pub y: i32,
+    /// Size of the window content in logical points — what `ViewportBuilder::with_inner_size`
+    /// expects.
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Smallest window we accept from a state file. Anything below is either a broken file or a
+/// drag onto a monitor that has since been smaller; the app's own minimum is a bit larger, so
+/// this only guards against nonsense.
+const MIN_GEOM_POINTS: f32 = 64.0;
+
+impl WindowGeom {
+    /// Is anything in here usable? A non-finite or absurdly small size would give a window that
+    /// cannot be seen, which is worse than falling back to the default geometry.
+    pub fn sane(&self) -> bool {
+        self.width.is_finite()
+            && self.height.is_finite()
+            && self.width >= MIN_GEOM_POINTS
+            && self.height >= MIN_GEOM_POINTS
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct Persisted<'a> {
     pub version: u32,
     pub options: Option<&'a AppOptions>,
     pub history: &'a [SavedTarget],
+    /// Missing in files written before the window remembered its place -> `None`, and the next
+    /// start uses the built-in default size.
+    pub window: Option<&'a WindowGeom>,
 }
 
 /// Read shape: `history` is read as raw JSON because v1 and v2 disagree about what a sample
@@ -82,6 +117,8 @@ struct PersistedIn {
     options: Option<AppOptions>,
     #[serde(default)]
     history: Vec<serde_json::Value>,
+    #[serde(default)]
+    window: Option<WindowGeom>,
 }
 
 /// Where `load`/`save` read and write. Checked on every call so a test can point it
@@ -111,13 +148,11 @@ pub fn state_path_in(dir: &std::path::Path) -> PathBuf {
     dir.join(STATE_FILE)
 }
 
-pub fn load() -> (AppOptions, Vec<SavedTarget>) {
-    load_from(&state_dir())
-}
-
-/// `load` for a directory given by the caller. A file that cannot be read or parsed stays a
-/// default app rather than taking the program down with it.
-pub fn load_from(dir: &std::path::Path) -> (AppOptions, Vec<SavedTarget>) {
+/// `load` plus the window geometry of the last run. Kept separate from [`load_from`] because most
+/// callers only ever want options and history, and a headless pass has no window to place.
+pub fn load_with_window(
+    dir: &std::path::Path,
+) -> (AppOptions, Vec<SavedTarget>, Option<WindowGeom>) {
     let path = state_path_in(dir);
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Ok(p) = serde_json::from_str::<PersistedIn>(&text) {
@@ -136,10 +171,13 @@ pub fn load_from(dir: &std::path::Path) -> (AppOptions, Vec<SavedTarget>) {
                     .map(SavedTarget::from_v1)
                     .collect(),
             };
-            return (opts, history);
+            // A geometry that fails `sane` is treated as absent, so the caller falls back to the
+            // default size instead of trying to honour a broken number.
+            let window = p.window.filter(|g| g.sane());
+            return (opts, history, window);
         }
     }
-    (AppOptions::default(), Vec::new())
+    (AppOptions::default(), Vec::new(), None)
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(v: &serde_json::Value) -> Option<T> {
@@ -171,6 +209,19 @@ impl SavedTarget {
     }
 }
 
+/// `load` for a directory given by the caller. A file that cannot be read or parsed stays a
+/// default app rather than taking the program down with it.
+pub fn load() -> (AppOptions, Vec<SavedTarget>) {
+    let (o, h, _) = load_with_window(&state_dir());
+    (o, h)
+}
+
+/// Same as [`load`], for a directory given by the caller.
+pub fn load_from(dir: &std::path::Path) -> (AppOptions, Vec<SavedTarget>) {
+    let (o, h, _) = load_with_window(dir);
+    (o, h)
+}
+
 pub fn save(options: &AppOptions, history: &[SavedTarget]) -> std::io::Result<()> {
     save_to(&state_dir(), options, history)
 }
@@ -181,6 +232,17 @@ pub fn save_to(
     options: &AppOptions,
     history: &[SavedTarget],
 ) -> std::io::Result<()> {
+    save_window_to(dir, options, history, None)
+}
+
+/// The one writer. `window` is the geometry to remember; `None` keeps the file's window field
+/// empty, which means "next start uses the default size".
+pub fn save_window_to(
+    dir: &std::path::Path,
+    options: &AppOptions,
+    history: &[SavedTarget],
+    window: Option<&WindowGeom>,
+) -> std::io::Result<()> {
     let path = state_path_in(dir);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -189,6 +251,7 @@ pub fn save_to(
         version: VERSION,
         options: Some(options),
         history,
+        window,
     };
     let text = serde_json::to_string_pretty(&p).unwrap_or_default();
     std::fs::write(&path, text)
@@ -245,6 +308,49 @@ mod tests {
         save_to(&dir, &AppOptions::default(), &[rt]).unwrap();
         let (_, again) = load_from(&dir);
         assert_eq!(again[0].samples, t.samples);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The window's place has to survive a save/load pair unchanged, and a file that was written
+    /// before the app remembered it must still load — with "no geometry" rather than a broken one.
+    #[test]
+    fn remembers_where_the_window_was() {
+        let dir = std::env::temp_dir().join(format!("system-ping-geom-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let opts = AppOptions::default();
+        let geom = WindowGeom {
+            x: 120,
+            y: -8,
+            width: 1280.0,
+            height: 800.5,
+        };
+
+        save_window_to(&dir, &opts, &[], Some(&geom)).unwrap();
+        let (_, _, back) = load_with_window(&dir);
+        assert_eq!(back, Some(geom));
+
+        // A plain `save` (the headless path) leaves the field out again.
+        save_to(&dir, &opts, &[]).unwrap();
+        assert_eq!(load_with_window(&dir).2, None);
+
+        // An old file without the field at all reads as "no geometry", not as an error.
+        std::fs::write(
+            state_path_in(&dir),
+            r#"{"version":2,"options":null,"history":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(load_with_window(&dir).2, None);
+
+        // A size of zero comes from a broken file or a hidden window; it must not be honoured.
+        let junk = WindowGeom {
+            x: 0,
+            y: 0,
+            width: 0.0,
+            height: 400.0,
+        };
+        save_window_to(&dir, &opts, &[], Some(&junk)).unwrap();
+        assert_eq!(load_with_window(&dir).2, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

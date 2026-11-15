@@ -2,8 +2,9 @@
 
 use crate::app::{self, App, TargetKind, View};
 use crate::history;
+use crate::store;
 use crate::theme::{self, Mode};
-use egui::{Color32, FontId, Label, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
+use egui::{Color32, CursorIcon, FontId, Label, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
 use std::path::PathBuf;
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
@@ -13,33 +14,40 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     center(ctx, app);
 }
 
+/// The two new-target fields in the top bar have to be found by id, because „Enter adds a target“
+/// should only fire while one of them has the focus. `TextEdit` derives its id from an explicit
+/// salt for exactly that reason — without it the id would follow the widget's position and change
+/// whenever the bar rewraps.
+///
+/// The salt is hashed with the panel's own `Ui` id, which is what `TextEdit` does internally
+/// (`ui.make_persistent_id(salt)`). So the id has to be built inside the panel, where that `Ui`
+/// is known, and handed out through [`App::new_target_ids`] for the focus check afterwards.
+const NEW_HOST_ID_SALT: &str = "new_host_field";
+const NEW_LABEL_ID_SALT: &str = "new_label_field";
+
+/// The two rows of controls above the panels. They are deliberately kept apart: the first row is
+/// "what the app does" (title, new target, start/stop), the second is "what is on screen" (view,
+/// filter). Cramped together they wrapped into each other at the minimum window width.
 pub fn top(ctx: &egui::Context, app: &mut App) {
     let m = app.theme_mode;
-    egui::TopBottomPanel::top("top_bar")
+    // Set when something worth persisting changed; the state is written once at the end of the
+    // panel so a click on a category chip cannot be lost until the next autosave.
+    let mut save_now = false;
+    egui::TopBottomPanel::top("title_bar")
         .frame(
             egui::Frame::new()
                 .fill(ctx.style().visuals.window_fill)
                 .inner_margin(egui::Margin::symmetric(10, 6)),
         )
         .show(ctx, |ui| {
+            // Row 1: title and horizon on the left, start/stop on the far right. Nothing here
+            // takes input, so the row stays one clean line at any window width.
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("System-Ping").color(m.accent()).strong());
                 ui.label(RichText::new("Latenz-Monitor").weak());
                 ui.separator();
-
-                let mut add = false;
-                let host_buf = app.new_host.clone();
-                let label_buf = app.new_label.clone();
-                ui.add_sized(
-                    [190.0, 22.0],
-                    egui::TextEdit::singleline(&mut app.new_host)
-                        .hint_text("Ziel, z. B. 192.168.1.1"),
-                );
-                ui.add_sized(
-                    [130.0, 22.0],
-                    egui::TextEdit::singleline(&mut app.new_label).hint_text("Name (optional)"),
-                );
-                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                // The chart window's preset picker (up to 24 h). It sits with the title because it
+                // says how much of the picture is shown, not what is being measured.
                 let combo = egui::ComboBox::from_id_salt("horizon_top")
                     .selected_text(horizon_label(app.options.horizon_secs))
                     .width(72.0)
@@ -49,22 +57,18 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                         }
                     });
                 let _ = combo.response.on_hover_text("Zeitfenster des Diagramms");
-                if (enter && !(host_buf.is_empty() && label_buf.is_empty()))
-                    || ui.button("+ Ziel").clicked()
+                if ui
+                    .add(egui::SelectableLabel::new(
+                        app.follow_live,
+                        if app.follow_live { "● Live" } else { "○ Live" },
+                    ))
+                    .on_hover_text(
+                        "Dem aktuellen Zeitfenster folgen — aus, wenn im Diagramm zurückgeblättert wird",
+                    )
+                    .clicked()
                 {
-                    add = true;
+                    app.follow_live = true;
                 }
-                if add {
-                    // Adding a target would shift the index the inline editor points at, so any
-                    // open editor is committed first.
-                    app.close_edit();
-                    app.new_host = host_buf;
-                    app.new_label = label_buf;
-                    app.add_target();
-                    app.new_host.clear();
-                    app.new_label.clear();
-                }
-
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Der Autostart-Knopf ist nur sichtbar, solange nicht gemessen wird.
                     // `autostart_state()` is the registry's answer (looked up at startup, then kept
@@ -99,7 +103,65 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 });
             });
 
+            // Row 2: everything that takes input — the new-target fields, the interval, the
+            // filter and the category switches. Kept apart from row 1 so the two never wrap into
+            // each other at the minimum window width.
             ui.horizontal(|ui| {
+                let mut add = false;
+                let host_buf = app.new_host.clone();
+                let label_buf = app.new_label.clone();
+                ui.add_sized(
+                    [190.0, 22.0],
+                    egui::TextEdit::singleline(&mut app.new_host)
+                        .id_salt(NEW_HOST_ID_SALT)
+                        .hint_text("Ziel, z. B. 192.168.1.1"),
+                );
+                ui.add_sized(
+                    [130.0, 22.0],
+                    egui::TextEdit::singleline(&mut app.new_label)
+                        .id_salt(NEW_LABEL_ID_SALT)
+                        .hint_text("Name (optional)"),
+                );
+                // Remembered for the Enter check at the end of the panel: these are the ids the
+                // two fields were given, which is what `Memory::focused` will report.
+                app.new_target_ids = [
+                    ui.make_persistent_id(NEW_HOST_ID_SALT),
+                    ui.make_persistent_id(NEW_LABEL_ID_SALT),
+                ];
+                // Enter adds the target only while one of the two fields has the focus; otherwise a
+                // key press meant for the chart or a combo box would silently create a row. The
+                // press itself is detected after the panel (see below) because `Ui::input` does not
+                // see keys that a text field already claimed.
+                if ui.button("+ Ziel").clicked() {
+                    add = true;
+                }
+                if add {
+                    // Adding a target would shift the index the inline editor points at, so any
+                    // open editor is committed first.
+                    app.close_edit();
+                    app.new_host = host_buf;
+                    app.new_label = label_buf;
+                    app.add_target();
+                    app.new_host.clear();
+                    app.new_label.clear();
+                }
+
+                ui.separator();
+                // Only the interval lives here. The chart window has its preset picker in the row
+                // above, and a second control for the same setting — worse still one that stopped
+                // at 15 min while the picker offers 24 h — was more confusing than useful.
+                if ui
+                    .add(
+                        egui::Slider::new(&mut app.options.interval_secs, 0.25..=10.0)
+                            .suffix(" s")
+                            .text("Intervall"),
+                    )
+                    .changed()
+                {
+                    save_now = true;
+                }
+                ui.separator();
+                // Views first: they decide what the rest of the window shows.
                 for view in [View::Chart, View::Events, View::Stats, View::Settings] {
                     let sel = app.view == view;
                     if ui
@@ -111,18 +173,6 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                     }
                 }
                 ui.separator();
-                ui.add(
-                    egui::Slider::new(&mut app.options.interval_secs, 0.25..=10.0)
-                        .suffix(" s")
-                        .text("Intervall"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut app.options.horizon_secs, 15.0..=900.0)
-                        .logarithmic(true)
-                        .suffix(" s")
-                        .text("Zeitfenster"),
-                );
-                ui.separator();
                 ui.add_sized(
                     [160.0, 22.0],
                     egui::TextEdit::singleline(&mut app.filter).hint_text("Ziele filtern"),
@@ -130,8 +180,71 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 if !app.filter.is_empty() && ui.button("✕").clicked() {
                     app.filter.clear();
                 }
+                // Categories double as a filter: a chip is on when its category is shown, and
+                // clicking it switches that whole group in every view (chart, legend, lists). Only
+                // categories that some target actually uses are offered — an empty switch is noise.
+                let mut kinds_dirty = false;
+                for &k in TargetKind::all().iter() {
+                    if !app.targets.iter().any(|t| t.kind == k) {
+                        continue;
+                    }
+                    let on = !app.options.kinds_off.contains(&app::kind_index(k));
+                    let mut chip = ui.selectable_label(on, RichText::new(k.label()).weak());
+                    if !on {
+                        chip = chip.on_hover_text(format!(
+                            "{k} wieder einblenden — im Moment ist die ganze Kategorie verborgen",
+                            k = k.label()
+                        ));
+                    } else {
+                        chip = chip.on_hover_text(format!(
+                            "{k} ausblenden — alle Ziele dieser Kategorie sind im Diagramm und in den Listen verborgen, gemessen wird weiter",
+                            k = k.label()
+                        ));
+                    }
+                    if !on {
+                        chip = chip.highlight();
+                    }
+                    if chip.clicked() {
+                        app.toggle_kind(k);
+                        kinds_dirty = true;
+                    }
+                }
+                if !app.all_kinds_on()
+                    && ui
+                        .small_button("alle")
+                        .on_hover_text("Alle Kategorien wieder einblenden")
+                        .clicked()
+                {
+                    app.show_all_kinds();
+                    kinds_dirty = true;
+                }
+                if kinds_dirty {
+                    save_now = true;
+                }
             });
+
+            // The Enter-to-add shortcut has to be judged outside the row: `Ui::input` only sees
+            // events that were routed into this panel, and a text field claims its keys for
+            // itself. So the context is asked directly, and the focus check decides whether the
+            // press belongs to one of the two new-target fields.
+            let focused = ui.ctx().memory(|mem| {
+                mem.focused()
+                    .is_some_and(|id| app.new_target_ids.contains(&id))
+            });
+            let want_add =
+                ui.input(|i| i.key_pressed(egui::Key::Enter)) && focused && !app.new_host.is_empty();
+            if want_add {
+                // Adding a target would shift the index the inline editor points at, so any open
+                // editor is committed first.
+                app.close_edit();
+                app.add_target();
+                app.new_host.clear();
+                app.new_label.clear();
+            }
         });
+    if save_now {
+        app.save_now();
+    }
 }
 
 /// The left panel: heading, count, and one row per target.
@@ -184,6 +297,11 @@ pub fn clicked_in_row(ctx: &egui::Context, rects: &[Rect]) -> Option<usize> {
 
 /// The panel's contents on their own. Tests call this directly so they can place the panel
 /// somewhere they control and click a row with a synthetic pointer.
+/// Height of a row in the target list, in ui points: two lines of text plus the frame's padding.
+/// The click area of a row is this tall, so it always covers exactly what the row shows — and an
+/// open editor keeps the same strip for its neighbour clicks (see `App::row_heights`).
+const ROW_H: f32 = 39.0;
+
 pub fn left_body(ui: &mut Ui, app: &mut App) {
     // Which row the current click belongs to, decided once before the rows are built. The rects
     // come from the previous pass; a real click always follows a pass that drew the rows.
@@ -245,6 +363,13 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                 let kind_label = t.kind.label().to_string();
                 let enabled = t.enabled;
                 let auto_idx = app.color_idx_of(t);
+                // Which palette slot this line uses, said plainly: automatic or picked by hand.
+                // Shown as a tooltip on the colour dash in the row.
+                let trace_tip = if auto_idx == crate::app::AUTO_COLOR {
+                    "Linienfarbe automatisch — im Editor wählbar".to_string()
+                } else {
+                    format!("Linienfarbe selbst gewählt ({})", auto_idx + 1)
+                };
                 // Details for this one target: how much history is kept, and what it says about
                 // the current window.
                 let horizon = app.options.horizon_secs as f64;
@@ -283,7 +408,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             // die Liste sagt, welche Kurve zu welchem Ziel gehört.
                             let (line_rect, _) =
                                 ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
-                            ui.painter().rect_filled(line_rect.shrink(4.0), 1.5, trace);
+                            ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
                             // Das Ziel loswerden, an dem man gerade arbeitet: ersetzt den Knopf
                             // „Ziel entfernen“ oben rechts, der das markierte Ziel traf und damit
                             // leicht das falsche erwischte.
@@ -447,26 +572,51 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                     continue;
                 }
 
-                let frame = egui::Frame::new()
+                let mut frame = egui::Frame::new()
                     .fill(m.row_fill(sel))
                     .corner_radius(5.0)
                     .inner_margin(egui::Margin::symmetric(7, 5));
-                // The labels are explicitly not selectable: selecting text is not what a row is for,
-                // and a selectable label senses clicks, which would let it swallow the press that
-                // belongs to the row. With every label on `Sense::hover()` the whole row stays one
-                // click target.
-                let resp = frame.show(ui, |ui| {
+                // A row is a button. `Frame::show` only ever registers `Sense::hover()`, so the
+                // click area has to be claimed separately: first a strip of fixed height that
+                // senses clicks, then the frame painted on top of it. Hovering brightens the strip
+                // and shows the pointer cursor, which says "a click opens the editor". Labels stay
+                // non-selectable so none of them swallows the press that belongs to the row.
+                let (strip_rect, strip) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), ROW_H),
+                    egui::Sense::click(),
+                );
+                let strip = strip.on_hover_cursor(CursorIcon::PointingHand);
+                if strip.hovered() {
+                    frame.fill = m.row_fill(true);
+                }
+                // The row's content goes into a child ui pinned to that strip, so the frame is
+                // painted exactly on the click area and cannot shift the list. `new_child` gives us
+                // the child directly; its used rect is handed back to the list by `prepared.end`.
+                let mut prepared =
+                    frame.begin(&mut ui.new_child(egui::UiBuilder::new().max_rect(strip_rect)));
+                {
+                    let ui = &mut prepared.content_ui;
                     ui.horizontal(|ui| {
                         let (dot_rect, _) =
                             ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                         let dot_rect = dot_rect.shrink(1.5);
                         ui.painter().rect_filled(dot_rect, 5.5, color);
                         // Strich in Linienfarbe: wer die Liste liest, sieht sofort, welche Kurve im
-                        // Diagramm zu diesem Ziel gehört.
+                        // Diagramm zu diesem Ziel gehört. Der Strich ist gleich hoch wie der Punkt,
+                        // damit beide zusammen eine Zeile bilden und nicht verschoben wirken.
                         let (line_rect, _) =
                             ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
-                        ui.painter().rect_filled(line_rect.shrink(4.0), 1.5, trace);
-
+                        ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
+                        // Was der Strich bedeutet: automatisch oder per Hand gewählte Linienfarbe. Der
+                        // Knauf ist derselbe wie im Diagramm, damit beide Stellen gleichbedeutend sind.
+                        let knob = Rect::from_center_size(
+                            line_rect.center(),
+                            Vec2::splat(crate::theme::LEGEND_KNOB),
+                        );
+                        ui.put(knob, Label::new("").selectable(false))
+                            .on_hover_text(&trace_tip);
+                        // Der Strich gehört zum Text: erst der Abstand, dann die Beschriftung.
+                        ui.add_space(7.0);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.add(
@@ -493,14 +643,16 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             );
                         });
                     });
-                });
+                }
+                // Closes the frame: paints it over the strip and hands its area back to the list.
+                prepared.end(ui);
 
-                // The click area of the row: `Frame::show` registers its area with `Sense::hover()`
-                // only, so this is the rect that says where a row is. It is stored on the app and
-                // used by `clicked_in_row` (and by the click test) on the next pass.
-                row_rects.push(resp.response.rect);
-                row_heights.push(resp.response.rect.height());
-                if clicked_row == Some(idx) {
+                // The strip allocated above is the row's click area. It is stored on the app and
+                // used by `clicked_in_row` (and by the click test) on the next pass, so a click
+                // still lands on the row it was aimed at even though the frame paints over it.
+                row_rects.push(strip_rect);
+                row_heights.push(strip_rect.height());
+                if clicked_row == Some(idx) || strip.clicked() {
                     begin_edit_idx = Some(idx);
                 }
             }
@@ -552,6 +704,12 @@ pub fn bottom(ctx: &egui::Context, app: &mut App) {
                 let mut lost = 0usize;
                 let horizon = app.options.horizon_secs as f64;
                 for t in &app.targets {
+                    // The counters follow the chart, so they say what is on screen. A target that
+                    // is filtered out or hidden is still measured — the events list and the CSV
+                    // keep counting it.
+                    if !app.shown(t) {
+                        continue;
+                    }
                     let s = t.series.stats_window(
                         t.series.last().map_or(0.0, |s| s.t_secs - horizon),
                         f64::MAX,
@@ -621,13 +779,8 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 
     ui.horizontal(|ui| {
         ui.label(RichText::new("Latenzverlauf").strong());
-        if ui
-            .selectable_label(app.follow_live, "Live")
-            .on_hover_text("Dem aktuellen Zeitfenster folgen")
-            .clicked()
-        {
-            app.follow_live = true;
-        }
+        // No „Live“ switch here: the top bar has it, and two controls for one state only invite
+        // confusion about which one is speaking.
         if ui.button("◀ zurück").clicked() {
             app.follow_live = false;
             app.pan_offset_secs += horizon * 0.25;
@@ -646,17 +799,56 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         if ui.button("frühere ⚐").clicked() {
             app.jump_to_prev_outlier();
         }
+        // The id whose visibility a click on its name asked to flip; applied after the loop, when
+        // `app.targets` is no longer borrowed by it.
+        let mut toggle: Option<usize> = None;
         for t in &app.targets {
+            // Only targets the text filter and the category chips let through are listed; among
+            // those, a hidden one still appears (weak, hollow knob) so its name can bring it back.
+            if !app.passes_filter(t) {
+                continue;
+            }
             let c = app.trace_color(t);
+            // Ein kleiner Farbknopf vor dem Namen, damit die Legende dasselbe Zeichen benutzt wie
+            // die Zielliste: quadratisch, überall gleich groß. Ein ausgeblendetes Ziel zeigt ihn
+            // nur als Umriss — so bleibt erkennbar, welche Farbe es hätte, wenn es wieder da ist.
+            let (knob_rect, _) = ui
+                .allocate_exact_size(Vec2::splat(crate::theme::LEGEND_KNOB), egui::Sense::hover());
+            if t.hidden {
+                ui.painter().rect_stroke(
+                    knob_rect.shrink(1.5),
+                    2.0,
+                    Stroke::new(1.0f32, c),
+                    egui::StrokeKind::Inside,
+                );
+            } else {
+                ui.painter().rect_filled(knob_rect.shrink(1.0), 2.0, c);
+            }
+            // Ein Klick auf den Namen blendet genau dieses Ziel ein oder aus — gemessen wird
+            // weiter, nur die Darstellung verschwindet. Der Name bleibt lesbar und schwach, damit
+            // man das ausgeblendete Ziel wiederfindet.
+            let name = RichText::new(&t.label)
+                .color(if t.hidden { m.text_weak() } else { c })
+                .strong();
+            let tip = if t.hidden {
+                format!("{} · ausgeblendet — klicken zum Einblenden", t.host)
+            } else {
+                format!(
+                    "{} · {} — klicken zum Ausblenden",
+                    t.host,
+                    app.status_text(t)
+                )
+            };
             if ui
-                .add(Label::new(RichText::new(&t.label).color(c).strong()).selectable(false))
-                .on_hover_text(format!("{} · {}", t.host, app.status_text(t)))
+                .add(Label::new(name).selectable(false))
+                .on_hover_text(tip)
                 .clicked()
             {
-                if let Some(i) = app.targets.iter().position(|x| x.id == t.id) {
-                    app.selected = i;
-                }
+                toggle = Some(t.id);
             }
+        }
+        if let Some(id) = toggle {
+            app.toggle_hidden_by_id(id);
         }
     });
 
@@ -667,22 +859,10 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         ),
         egui::Sense::click_and_drag(),
     );
-    if resp.dragged() {
-        app.follow_live = false;
-        app.pan_offset_secs += (resp.drag_delta().x as f64) * (horizon / rect.width() as f64);
-        if app.pan_offset_secs < 0.0 {
-            app.pan_offset_secs = 0.0;
-        }
-    }
 
-    // The p95 line sits at the 95th percentile of the replies inside the visible window, so
-    // it follows the trace instead of being pushed off by one long spike. The scan goes into
-    // a scratch buffer on the app, which keeps this allocation-free per frame.
+    // Right edge of the visible window, including the pull-back a still picture needs. Computed
+    // before the wheel zoom so the anchor maths below and the axis drawing agree on one number.
     let mut t_max = now - app.pan_offset_secs;
-    let mut t_min = t_max - horizon;
-    // In a still picture the trace has to end at the right edge, like it does while the
-    // probes are running. The example history stops at its own last stamp, so the window is
-    // pulled back to that point instead of leaving empty space on the right.
     if shot_frame {
         let mut newest = f64::MIN;
         for t in &app.targets {
@@ -694,10 +874,64 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             let slack = (t_max - newest).min(horizon * 0.45);
             if slack > 0.0 {
                 t_max -= slack;
-                t_min = t_max - horizon;
             }
         }
     }
+
+    if resp.dragged() {
+        app.follow_live = false;
+        app.pan_offset_secs += (resp.drag_delta().x as f64) * (horizon / rect.width() as f64);
+        if app.pan_offset_secs < 0.0 {
+            app.pan_offset_secs = 0.0;
+        }
+    }
+
+    // Wheel over the plot zooms the time window instead of scrolling a panel that has no scroll
+    // bar. The moment under the cursor keeps its place, so zooming in on an event lands where it
+    // was pointed at. The horizon is kept on the preset ladder from the top bar: `HORIZON_CHOICES`
+    // picks the step above or below the requested size, which keeps the number and the saved value
+    // familiar rather than turning them into a continuum of odd fractions.
+    // The plot is the central panel, so "the pointer is over the plot" is exactly "the pointer is
+    // inside the panel's rect and no other widget has taken it".
+    let zoom = ui.ctx().input(|i| {
+        let Some(pos) = i.pointer.hover_pos() else {
+            return 0.0;
+        };
+        if rect.contains(pos) {
+            i.raw_scroll_delta.y
+        } else {
+            0.0
+        }
+    });
+    if zoom.abs() > 0.5 && rect.width() > 1.0 {
+        let u = ((resp.hover_pos().unwrap_or(rect.center()).x - rect.left()) as f64
+            / rect.width() as f64)
+            .clamp(0.0, 1.0);
+        // Factor per notch: four notches cover roughly a decade of zoom.
+        let factor = f64::from(-zoom * 0.12).exp();
+        let want = (horizon * factor).clamp(5.0, 86_400.0);
+        let next = pick_horizon(want);
+        if (f64::from(next) - horizon).abs() > f64::EPSILON {
+            // Anchor the cursor's time between old and new window, then clamp at „now“, which is
+            // as far right as the plot ever goes.
+            let anchor = t_max + u * (f64::from(next) - horizon);
+            app.horizon_secs_set(next);
+            app.follow_live = false;
+            app.pan_offset_secs = (now - anchor).max(0.0);
+        }
+    }
+
+    // A double click returns to the live window, the same way it does in a map or a timeline.
+    if resp.double_clicked() {
+        app.follow_live = true;
+        app.pan_offset_secs = 0.0;
+    }
+
+    let t_min = t_max - horizon;
+
+    // The p95 line sits at the 95th percentile of the replies inside the visible window, so
+    // it follows the trace instead of being pushed off by one long spike. The scan goes into
+    // a scratch buffer on the app, which keeps this allocation-free per frame.
 
     // Vertical grid + time labels.
     let step = nice_step(horizon);
@@ -774,6 +1008,15 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             m.axis_text(),
         );
     }
+    // The top edge of the plot is where the auto scale ends, and that number changes with the
+    // data. Said out loud, it stops being a guess — especially when spikes are clamped there.
+    ui.painter().text(
+        egui::pos2(rect.left() + 3.0, rect.top() + 2.0),
+        egui::Align2::LEFT_TOP,
+        format!("{:.0} ms", scale_top),
+        FontId::monospace(10.0),
+        m.axis_text(),
+    );
 
     // Loss band along the bottom.
     let loss_h = 14.0;
@@ -911,9 +1154,18 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                 );
             }
             let gal = ui.painter().layout_job(layout_job);
+            // The readout follows the cursor's row rather than sticking to the top: with many
+            // targets the block gets tall, and at the top it would cover the very traces it is
+            // reading values from. Near the bottom edge it flips above the cursor instead.
+            let h = gal.size().y + 6.0;
+            let below = p.y + 14.0 + h <= rect.bottom();
             let pos = egui::pos2(
                 (p.x + 10.0).min(rect.right() - gal.size().x - 6.0),
-                rect.top() + 6.0,
+                if below {
+                    (p.y + 14.0).max(rect.top() + 6.0)
+                } else {
+                    (p.y - 14.0 - h).max(rect.top() + 6.0)
+                },
             );
             ui.painter().rect_filled(
                 egui::Rect::from_min_size(pos, gal.size() + Vec2::splat(6.0)),
@@ -955,13 +1207,18 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 
 /// Column widths for the statistics grid: Ziel, Host, Status, Min, Ø, Median,
 /// p95, Max, Verlust, Ausr.
+/// Column widths of the statistics table: Ziel, Host, Status, Schnitt, Min, Letzter, P95, Max,
+/// Ausfälle, Verlust. The first two hold names and addresses, which are what actually gets long;
+/// the numbers are fixed-width monospace, so they only need room for the header word.
 fn column_widths() -> [f32; 10] {
-    [150.0, 130.0, 84.0, 64.0, 64.0, 72.0, 64.0, 64.0, 72.0, 56.0]
+    [200.0, 150.0, 84.0, 64.0, 64.0, 72.0, 64.0, 64.0, 72.0, 56.0]
 }
 
 fn is_shown(app: &App, t: &crate::app::Target) -> bool {
     match app.view {
-        View::Chart => true,
+        // The chart follows the filter row and the legend clicks; a hidden target leaves the plot
+        // and with it its own contribution to the millisecond scale.
+        View::Chart => app.shown(t),
         _ => app.targets.get(app.selected).map(|x| x.id) == Some(t.id),
     }
 }
@@ -1048,6 +1305,11 @@ fn events_view(ui: &mut Ui, app: &mut App) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for idx in 0..app.targets.len() {
+                // The status list follows the same filters as the chart; a target hidden from the
+                // plot is hidden here too.
+                if !app.shown(&app.targets[idx]) {
+                    continue;
+                }
                 let color = app.status_color(&app.targets[idx]);
                 let trace = app.trace_color(&app.targets[idx]);
                 let txt = app.status_text(&app.targets[idx]);
@@ -1204,8 +1466,10 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
     ui.label(RichText::new("Statistiken").strong());
     ui.add_space(6.0);
 
-    // The visible targets are looked up once, so the row count and the row lookup agree.
-    let ids: Vec<usize> = app.visible_targets();
+    // The targets to list are looked up once, so the row count and the row lookup agree. Hidden
+    // targets are left out here: unlike the legend, a statistics table has no way to switch them
+    // back on.
+    let ids: Vec<usize> = app.shown_target_ids();
     let horizon = app.options.horizon_secs as f64;
     // Taken out of the app so it can be reused while `app.targets` is borrowed.
     let mut scratch = std::mem::take(&mut app.stats_scratch);
@@ -1320,6 +1584,10 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
         // Taken out of the app so it can be reused while `app.targets` is borrowed.
         let mut scratch = std::mem::take(&mut app.stats_scratch);
         for t in &app.targets {
+            // Same targets as the table above, so "Gesamt" adds up exactly the rows shown.
+            if !app.shown(t) {
+                continue;
+            }
             let s = t.series.stats_window(
                 t.series.last().map_or(0.0, |s| s.t_secs - horizon),
                 f64::MAX,
@@ -1352,6 +1620,18 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
 
 /* --------------------------------------------------------------- settings */
 
+/// The preset window closest to a requested size. Used by the chart's wheel zoom: the ladder from
+/// [`app::HORIZON_CHOICES`] keeps the number recognisable and matches what the combo box in the
+/// top bar can show, instead of inventing windows no control could name.
+fn pick_horizon(secs: f64) -> f32 {
+    let want = secs as f32;
+    app::HORIZON_CHOICES
+        .iter()
+        .min_by_key(|c| ((c.secs - want).abs() * 100.0) as i64)
+        .map(|c| c.secs)
+        .unwrap_or(60.0)
+}
+
 /// The label of the current window length, and a fallback for a value from an older file that
 /// is not one of the presets.
 fn horizon_label(secs: f32) -> String {
@@ -1377,14 +1657,21 @@ fn horizon_hint(secs: f32) -> String {
 
 fn settings(ui: &mut Ui, app: &mut App) {
     let mut dirty = false;
+    let m = app.theme_mode;
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.group(|ui| {
             ui.label(RichText::new("Prüfung").strong());
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Intervall");
-                if ui.add(egui::Slider::new(&mut app.options.interval_secs, 0.25..=10.0).suffix(" s")).changed() { dirty = true; }
-            });
+            // Das Intervall hat seinen Regler oben in der Leiste und wird von dort gespeichert;
+            // ein zweiter Regler für dieselbe Zahl war nur eine zweite Gelegenheit, sich zu
+            // wundern, wo man es gerade geändert hat.
+            ui.label(
+                RichText::new(format!(
+                    "Intervall: {:.2} s — oben in der Leiste einzustellen",
+                    app.options.interval_secs
+                ))
+                .weak(),
+            );
             ui.horizontal(|ui| {
                 ui.label("Zeitüberschreitung");
                 if ui.add(egui::DragValue::new(&mut app.options.timeout_ms).range(200..=10_000).suffix(" ms").speed(50)).changed() { dirty = true; }
@@ -1510,22 +1797,59 @@ fn settings(ui: &mut Ui, app: &mut App) {
             ui.label(RichText::new("Daten").strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("CSV exportieren").clicked() {
+                if ui
+                    .button("CSV exportieren")
+                    .on_hover_text("Schreibt in den Ordner der gespeicherten Einstellungen")
+                    .clicked()
+                {
                     let path = default_export_path();
                     app.export_csv(path);
+                }
+                if ui
+                    .button("Speichern unter…")
+                    .on_hover_text("Ordner und Dateiname selbst wählen")
+                    .clicked()
+                {
+                    app.open_export_dialog();
                 }
                 if ui.button("Speichern").clicked() {
                     app.save_now();
                 }
                 // Betrifft alle Ziele — deshalb sagt der Knopf das auch. Ein offener Editor wird
                 // vorher übernommen, sonst verschwinden die Werte unter den offenen Eingaben weg.
-                if ui
-                    .button("Messwerte löschen")
-                    .on_hover_text("Verlauf und Statistik aller Ziele leeren. Die Ziele selbst bleiben erhalten.")
-                    .clicked()
-                {
-                    app.close_edit();
-                    app.reset_stats();
+                // Weil sich der Verlauf nicht zurückholen lässt, will der Knopf zwei Klicks: der
+                // erste scharft ihn nur an und fragt nach, der zweite löscht. Nach ein paar Sekunden
+                // verfängt sich die Nachfrage wieder, sonst löscht ein vergessener Warnhinweis.
+                let clear_label = if app.clear_armed {
+                    "Wirklich löschen?"
+                } else {
+                    "Messwerte löschen"
+                };
+                let clear_btn = ui.button(RichText::new(clear_label).color(if app.clear_armed {
+                    m.danger_text()
+                } else {
+                    Color32::from_rgb(150, 150, 150)
+                }));
+                // `on_hover_text` consumes the response, so both arms of the choice have to be
+                // written as one expression that hands the (unchanged) response back.
+                let clear_btn = if app.clear_armed {
+                    clear_btn.on_hover_text("Nochmal klicken: Verlauf und Statistik aller Ziele löschen.")
+                } else {
+                    clear_btn.on_hover_text(
+                        "Verlauf und Statistik aller Ziele leeren. Die Ziele selbst bleiben erhalten. Zwei Klicks nötig.",
+                    )
+                };
+                if clear_btn.clicked() {
+                    if app.clear_armed {
+                        // Second click within the window: do it.
+                        app.clear_armed = false;
+                        app.clear_at = None;
+                        app.close_edit();
+                        app.reset_stats();
+                    } else {
+                        app.clear_armed = true;
+                        app.clear_at = Some(std::time::Instant::now());
+                    }
                 }
                 ui.label(RichText::new("Einstellungen und Verlauf werden automatisch gesichert.").weak().size(11.5));
             });
@@ -1586,9 +1910,15 @@ fn settings(ui: &mut Ui, app: &mut App) {
     }
 }
 
+/// Where „CSV exportieren“ writes without asking: the state folder, so the file lands next to the
+/// settings instead of wherever the shortcut happened to start the program from.
 pub fn default_export_path() -> PathBuf {
+    store::state_dir().join(default_export_name())
+}
+
+/// The suggested file name — a timestamped name in the root of the target folder. Shared by the
+/// automatic export and the pre-filled name of „Speichern unter…“.
+pub fn default_export_name() -> String {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(format!("system-ping-{}.csv", stamp))
+    format!("system-ping-{stamp}.csv")
 }

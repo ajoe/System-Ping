@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 7 Unit-Tests + 39 Integrationstests (ohne GUI)
+cargo test                   # 8 Unit-Tests + 43 Integrationstests (ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -71,6 +71,33 @@ collect: 15 Messwerte in dieser Zeit, davon 15 Antworten
 
 Der Lauf speichert sein Ergebnis, also zeigt `--export-csv` direkt danach dieselben Werte.
 
+## Sehen, was man messen will
+
+Ob ein Ziel im Diagramm, in der Legende, in der Ereignisliste und in der Statistik steht, wird an
+einer Stelle entschieden: es muss den Textfilter oben passieren (er sucht in Name, Adresse **und**
+Kategorie) und die Kategorie muss an sein.
+
+* **Kategorien als Schalter.** In der zweiten Zeile der Kopfzeile hängt pro benutzter Kategorie
+  ein Knopf („Gateway“, „LAN-Gerät“, „DNS“, …). Ausgeschaltet verbirgt er alle Ziele dieser
+  Kategorie in allen Ansichten — gemessen wird weiter, es fehlt nur die Darstellung. Der Knopf
+  „alle“ blendet alles wieder ein; die Wahl wird gespeichert.
+* **Einzelne Ziele per Klick in der Legende.** Ein Klick auf den Namen eines Ziels in der Legende
+  oben im Diagramm blendet genau dieses eine Ziel aus, ein zweiter holt es zurück. Ausgeblendete
+  Ziele stehen weiterhin in der Legende — schwach geschrieben und mit einem hohlen Farbfleck statt
+  einer vollen Scheibe —, sonst gäbe es kein Zurück. Sie fehlen nur in der Statistik-Tabelle, die
+  keinen Schalter zum Zurückholen hat.
+
+## Im Diagramm blättern und zoomen
+
+Neben „◀ zurück“/„vor ▶“ und den Sprungknöpfen zu Ausreißern (⚑) kann das Diagramm selbst bedient
+werden:
+
+* **Mausrad über dem Diagramm** zoomt in das Zeitfenster hinein bzw. wieder heraus, und zwar um die
+  Stelle unter dem Zeiger herum. Das Ergebnis ist immer eine der Voreinstellungen aus der Liste
+  oben (5 s bis 24 h), damit die Achse ein Name bleibt, den auch die ComboBox zeigen kann. Zoomen
+  verlässt „Live“.
+* **Doppelklick ins Diagramm** geht zurück an das Ende: Fenster wird auf „Live“ gesetzt.
+
 ## Diagramm über 24 Stunden
 
 Das Zeitfenster des Diagramms ist eine Voreinstellung, kein Schieberegler — von 15 s bis
@@ -89,8 +116,14 @@ einträgt, bekommt sie, alles unter 1 024 wird auf diese Untergrenze gehoben.
 * `system-ping-state.json` — Optionen plus Verlauf. Version 2 speichert jeden Messwert mit
   absoluter Unix-Zeit in Millisekunden; Dateien von Version 1 (Sekunden seit Prozessstart)
   werden beim Laden auf eine echte Zeitachse gehoben.
-* CSV-Export: `timestamp,target,latency_ms,status` mit lokalen ISO-8601-Stempeln. Eine
-  optionale Protokoll-Datei schreibt jeden Messwert sofort fortlaufend mit.
+* Dieselbe Datei merkt sich die **Fenstergröße und -position** (Feld `window`, innere Position in
+  physikalischen Pixeln, Größe in logischen Punkten). Beim nächsten Start liegt das Fenster wieder
+  da, wo es war; unplausible Werte (Null oder winzig) werden verworfen und es gibt die
+  Standardgröße 1080×700. Ein `--shot` ändert die gespeicherte Lage nicht.
+* CSV-Export: `timestamp,target,latency_ms,status` mit lokalen ISO-8601-Stempeln. „CSV exportieren“
+  schreibt in den Zustandsordner, „Speichern unter…“ fragt vorher nach einem Ziel; beides läuft im
+  Hintergrund, damit das Fenster beim Antworten nicht stehenbleibt. Eine optionale Protokoll-Datei
+  schreibt jeden Messwert sofort fortlaufend mit.
 
 ## Was noch fehlt
 

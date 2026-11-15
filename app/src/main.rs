@@ -75,9 +75,31 @@ fn collect_secs_from_args() -> Option<f64> {
     None
 }
 
+/// The task-bar and title-bar icon, compiled into the program so no file has to travel with it.
+/// Decoded from PNG at startup; on failure an empty icon is handed out, which makes egui fall
+/// back to its own default rather than failing the whole start over a picture.
+fn app_icon() -> eframe::egui::IconData {
+    const PNG: &[u8] = include_bytes!("../../assets/icon.png");
+    match image::load_from_memory(PNG) {
+        Ok(img) => {
+            let img = img.into_rgba8();
+            let (w, h) = img.dimensions();
+            eframe::egui::IconData {
+                rgba: img.into_raw(),
+                width: w,
+                height: h,
+            }
+        }
+        Err(e) => {
+            eprintln!("icon.png konnte nicht gelesen werden: {e}");
+            eframe::egui::IconData::default()
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
-    // Load saved settings before the window exists.
-    let (options, saved) = store::load();
+    // Load saved settings before the window exists — including where the window sat last time.
+    let (options, saved, window) = store::load_with_window(&store::state_dir());
 
     // `--export-csv <file>` writes the recorded samples and quits: it must never open a
     // window, because a hidden eframe window is only closed by an event loop that keeps
@@ -109,7 +131,21 @@ fn main() -> eframe::Result<()> {
     let mut vp = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 700.0])
         .with_min_inner_size([640.0, 420.0])
-        .with_title("System-Ping Open Source — Latenz-Monitor");
+        .with_title("System-Ping Open Source — Latenz-Monitor")
+        .with_icon(app_icon());
+    // The window comes back where it was. A geometry from a file that has since gone bad (a size
+    // of zero, numbers that are not numbers) is dropped silently and the default above stands.
+    if let Some(g) = window.filter(|g| g.sane()) {
+        if shot.is_none() {
+            // `ViewportBuilder::with_position` wants the top-left of the *frame*, in physical
+            // pixels — the same thing `inner_position` plus a title-bar shift describes, which is
+            // what was stored. The title bar's height is not known before the window exists, so
+            // the saved inner position is used as-is and then clamped to a monitor below; on
+            // Windows that offset is small and never leaves the window off screen.
+            vp = vp.with_position([g.x as f32, g.y as f32]);
+        }
+        vp = vp.with_inner_size([g.width, g.height]);
+    }
     if shot.is_some() {
         // Off-screen run: no window on the desktop while writing the PNG.
         vp = vp.with_visible(false);

@@ -47,6 +47,15 @@ impl TargetKind {
     }
 }
 
+/// Position of a category in [`TargetKind::all`]. The category filter stores these numbers, so the
+/// list of switched-off categories stays a plain vec of small integers.
+pub fn kind_index(kind: TargetKind) -> usize {
+    TargetKind::all()
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(0)
+}
+
 /// Marker for "this target's colour comes from the palette, picked by its position in the list".
 pub const AUTO_COLOR: usize = usize::MAX;
 
@@ -61,6 +70,10 @@ pub struct Target {
     /// i.e. a colour picked automatically from the position in the list. A manual choice stores
     /// the number and therefore survives both a restart and a reordering of the list.
     pub color_idx: usize,
+    /// Hidden from the chart, legend and lists by a click on the target's name in the legend.
+    /// Only presentation: the target keeps being probed and its history keeps growing. Not stored
+    /// — after a restart every target is visible again.
+    pub hidden: bool,
     pub series: Series,
     /// Seconds since start of the last completed probe (NaN = never).
     pub last_probe_secs: f64,
@@ -79,6 +92,7 @@ impl Target {
             kind,
             enabled: true,
             color_idx: AUTO_COLOR,
+            hidden: false,
             // The real capacity comes from the app's settings (`sync_caps`), which this
             // constructor cannot see. It only has to be big enough for a target that is added
             // and measured before the first sync, so it uses the same floor the settings use.
@@ -119,6 +133,17 @@ pub struct AppOptions {
     /// Where that file goes; empty means next to the saved data.
     #[serde(default)]
     pub protocol_path: String,
+    /// Categories the chart and the lists show, as numbers into [`TargetKind::all`] — a list of
+    /// indices rather than a `HashSet` so it stays trivially serialisable and keeps its order.
+    /// Missing in old files -> every category is on. See [`AppOptions::kind_filter`].
+    #[serde(default = "all_kinds_on")]
+    pub kinds_off: Vec<usize>,
+}
+
+/// The default for [`AppOptions::kinds_off`]: nothing switched off, so a state file written before
+/// the category filter existed keeps showing every target.
+fn all_kinds_on() -> Vec<usize> {
+    Vec::new()
 }
 
 /// "system", "light" or "dark": which look to use.
@@ -235,6 +260,7 @@ impl Default for AppOptions {
             theme: String::from("system"),
             protocol_log: false,
             protocol_path: String::new(),
+            kinds_off: Vec::new(),
         }
     }
 }
@@ -299,9 +325,19 @@ pub struct App {
     /// state and clears it, because a colour is stored per target and not in `AppOptions`.
     pub color_dirty: bool,
 
+    /// The "Messwerte löschen" button asks for a second click instead of deleting on the first:
+    /// the first click only arms it and turns its label into a warning. See [`Self::clear_at`].
+    pub clear_armed: bool,
+    /// When [`Self::clear_armed`] was set. The arming lapses after a few seconds so an ignored
+    /// warning cannot delete history minutes later by accident.
+    pub clear_at: Option<std::time::Instant>,
+
     // Chart interaction
     pub hover_x: Option<f64>,
     pub follow_live: bool,
+    /// Ids of the two new-target fields, filled while the top bar is drawn. The Enter shortcut
+    /// compares `Memory::focused` against them (see `ui::NEW_HOST_ID_SALT`).
+    pub new_target_ids: [egui::Id; 2],
     pub pan_offset_secs: f64,
 
     // Log of notable events (outages, recoveries).
@@ -328,6 +364,13 @@ pub struct App {
     // Background work handoff
     pending_export: Arc<AtomicBool>,
     export_result: Arc<MutexSlot<String>>,
+    /// „Speichern unter…“ dialog: whether one is open, and its answer. A channel rather than a
+    /// slot because the dialog's result may legitimately be `None` (the user cancelled). Only the
+    /// receiving end is kept; the sending half is handed to the dialog thread each time. It never
+    /// leaves the UI thread — the dialog thread only ever holds its own sender — so an `Rc` is
+    /// enough and Clippy agrees that an `Arc` here would be a promise the type cannot keep.
+    pending_dialog: Arc<AtomicBool>,
+    export_dialog: std::rc::Rc<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     /// Registry answer for the autostart entry, written by a background thread. Read through
     /// `autostart_state()`, which turns „not yet looked up“ into `None`.
     autostart_state: Arc<AtomicUsize>,
@@ -344,14 +387,36 @@ pub struct App {
     /// the last pass. Only consumer is the click test, which needs it to aim a synthetic mouse
     /// at a real row instead of guessing coordinates.
     pub row_rects: Vec<egui::Rect>,
-    /// Line spacing inside a target row's label block, reported by [`ui::left_body`]. Together
-    /// with [`Self::row_rects`] it lets the click test aim at the gap between the two lines —
-    /// the only spot in a row that no label covers.
-    pub row_label_gap: f32,
     /// Height of every row in the target list from the last pass. While a row is being edited its
     /// frame is replaced by a much taller form; remembering the old height keeps that row's click
     /// area where it was, so the rows below it do not move out from under the mouse.
     pub row_heights: Vec<f32>,
+    /// Where the window was during the last drawn pass, so a save at any moment — including the
+    /// one on exit — can write it. `None` before the first frame and for a hidden window.
+    pub window_geom: Option<store::WindowGeom>,
+}
+
+/// The window's place as egui sees it: `screen_rect` is the content area in logical points, and
+/// `pixels_per_point` relates that to the physical pixels [`eframe::egui::ViewportBuilder`] wants
+/// for its position. Together they round-trip through the state file without a winit handle, which
+/// `eframe::App::on_exit` does not offer.
+///
+/// A window that is hidden or minimised reports an empty screen rect; `WindowGeom::sane` rejects
+/// that, so such a pass simply does not update the remembered place.
+pub fn window_geom(ctx: &egui::Context) -> Option<store::WindowGeom> {
+    let (rect, ppu) = ctx.input(|i| (i.screen_rect(), i.pixels_per_point()));
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        // A hidden or minimised window reports an empty area; keep whatever was last good.
+        return None;
+    }
+    let ppu = if ppu > 0.0 { ppu } else { 1.0 };
+    let g = store::WindowGeom {
+        x: (rect.left() * ppu) as i32,
+        y: (rect.top() * ppu) as i32,
+        width: rect.width(),
+        height: rect.height(),
+    };
+    g.sane().then_some(g)
 }
 
 impl App {
@@ -361,8 +426,15 @@ impl App {
     /// It lives here (and not only in `eframe::App::update`) so a test can drive a real frame
     /// without a window.
     pub fn frame(&mut self, ctx: &egui::Context) {
+        // Remembered on every pass because `on_exit` has no window handle of its own; the last
+        // frame before the close is what puts the window back next time. Cheap, and a hidden
+        // window reports no screen rect (see `window_geom`).
+        self.window_geom = window_geom(ctx);
         let now = self.engine.elapsed_secs();
         self.tick(now);
+        // The "Messwerte löschen" warning lapses on its own, also when the view is elsewhere or
+        // nothing is clicked. Checked per frame so no repaint has to be forced for it.
+        self.expire_clear_armed();
         crate::ui::draw(ctx, self);
         // A live monitor repaints even when nobody touches it: samples arrive on their own,
         // and egui would otherwise sit idle until the next mouse event.
@@ -381,6 +453,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The last write of the run also carries the window's place, so the next start can put
+        // it back where it was.
         self.save_now();
     }
 }
@@ -602,6 +676,8 @@ impl App {
             edit_enabled: true,
             edit_color_idx: AUTO_COLOR,
             color_dirty: false,
+            clear_armed: false,
+            clear_at: None,
             hover_x: None,
             follow_live: true,
             pan_offset_secs: 0.0,
@@ -613,6 +689,9 @@ impl App {
             save_due_secs: None,
             pending_export: Arc::new(AtomicBool::new(false)),
             export_result: Arc::new(MutexSlot::new()),
+            pending_dialog: Arc::new(AtomicBool::new(false)),
+            // An empty channel to start with; `open_export_dialog` swaps in the real receiver.
+            export_dialog: std::rc::Rc::new(std::sync::mpsc::channel().1),
             autostart_state: Arc::new(AtomicUsize::new(usize::MAX)),
             status_msg: String::from(
                 "Bereit. Ziel hinzufügen und mit „Start“ die Messung beginnen.",
@@ -620,8 +699,11 @@ impl App {
             chart_p95: Vec::new(),
             stats_scratch: Vec::new(),
             row_rects: Vec::new(),
-            row_label_gap: 0.0,
             row_heights: Vec::new(),
+            window_geom: None,
+            // Placeholder until the top bar has been drawn once, which happens before any key can
+            // reach the fields.
+            new_target_ids: [egui::Id::new("unset_host"), egui::Id::new("unset_label")],
             protocol: if protocol_on {
                 let path = if trimmed_path.is_empty() {
                     store::state_dir().join("protocol.csv")
@@ -710,6 +792,8 @@ impl App {
         // A finished CSV export reports itself here; nothing else picks the message up, and
         // without this the status bar would read „Schreibe CSV-Datei …“ forever.
         self.take_export_result();
+        // And the „Speichern unter…“ dialog once it comes back.
+        self.take_export_dialog();
         // Same for the autostart lookup that started at launch.
         self.poll_autostart();
 
@@ -1215,6 +1299,12 @@ impl App {
             self.status_msg = String::from("Es gibt noch keine Messwerte zum Exportieren.");
             return;
         }
+        self.write_csv(path, rows);
+    }
+
+    /// The actual write, shared by the automatic path and the „Speichern unter…“ dialog. It runs
+    /// on a worker thread so a slow disk or a network share never stops the window from drawing.
+    fn write_csv(&mut self, path: PathBuf, rows: Vec<exporter::Row>) {
         self.pending_export.store(true, Ordering::Release);
         let flag = Arc::clone(&self.pending_export);
         let slot = Arc::clone(&self.export_result);
@@ -1227,6 +1317,62 @@ impl App {
             flag.store(false, Ordering::Release);
         });
         self.status_msg = String::from("Schreibe CSV-Datei …");
+    }
+
+    /// Open the system's „Speichern unter…“ dialog and export to whatever it returns.
+    ///
+    /// The dialog runs on its own thread: on Windows it pumps messages of its own, which would
+    /// fight egui's paint pass for the same raw window handle if this were called inline. So the
+    /// caller only has to be somewhere that is allowed to spawn a thread, and the result arrives
+    /// through [`App::take_export_dialog`]. Cancelling leaves `status_msg` alone.
+    pub fn open_export_dialog(&mut self) {
+        if self.pending_dialog.load(Ordering::Acquire) {
+            return;
+        }
+        let rows = collect_export_rows(&self.targets);
+        if rows.is_empty() {
+            self.status_msg = String::from("Es gibt noch keine Messwerte zum Exportieren.");
+            return;
+        }
+        self.pending_dialog.store(true, Ordering::Release);
+        let flag = Arc::clone(&self.pending_dialog);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = crate::ui::default_export_name();
+        std::thread::spawn(move || {
+            // `rfd` needs a parent window on Windows to behave like a modal; without one the
+            // dialog still works, it just is not tied to the app's z-order. Running it here, off
+            // the paint pass, is what keeps its message pump from fighting egui for the window.
+            let chosen = rfd::FileDialog::new()
+                .set_title("CSV exportieren")
+                .set_file_name(&start)
+                .add_filter("CSV-Datei", &["csv"])
+                .save_file();
+            // The receiver may already be gone if the app closed while the dialog was open.
+            let _ = tx.send(chosen);
+            flag.store(false, Ordering::Release);
+        });
+        // The receiver is swapped in here rather than passed to the thread: `take_export_dialog`
+        // reads it on the next frame, and a channel that was never handed out simply stays empty.
+        self.export_dialog = std::rc::Rc::new(rx);
+        let _ = tx;
+        self.status_msg = String::from("Dialog zum Speichern geöffnet …");
+    }
+
+    /// Take the dialog's answer, if there is one. A chosen path starts the export right away; a
+    /// cancelled dialog reports nothing so the previous status message stays visible.
+    pub fn take_export_dialog(&mut self) {
+        let Some(path) = self.export_dialog.try_recv().ok() else {
+            return;
+        };
+        match path {
+            Some(path) => {
+                let rows = collect_export_rows(&self.targets);
+                if !rows.is_empty() {
+                    self.write_csv(path, rows);
+                }
+            }
+            None => self.status_msg = String::from("Export abgebrochen."),
+        }
     }
 
     pub fn take_export_result(&mut self) {
@@ -1280,6 +1426,17 @@ impl App {
         }
     }
 
+    /// Set the chart window from a control that lives outside the options form (the wheel zoom in
+    /// the plot). The cap is the same one the settings clamp to, so a zoomed horizon cannot ask for
+    /// more samples than [`effective_max_samples`] allows.
+    pub fn horizon_secs_set(&mut self, secs: f32) {
+        let secs = secs.clamp(5.0, 86_400.0);
+        if (self.options.horizon_secs - secs).abs() > f32::EPSILON {
+            self.options.horizon_secs = secs;
+            self.save_now();
+        }
+    }
+
     pub fn set_autostart(&mut self, on: bool) {
         self.options.autostart = on;
         let slot = Arc::clone(&self.autostart_state);
@@ -1290,14 +1447,20 @@ impl App {
     }
 
     pub fn save_now(&mut self) {
-        let _ = self.save_now_to(&store::state_dir());
+        let dir = store::state_dir();
+        // `window_geom` is the last frame's answer; on the very first save of a run it is still
+        // None, which simply leaves the file's window field empty.
+        let _ = store::save_window_to(
+            &dir,
+            &self.options,
+            &self.saved_targets(),
+            self.window_geom.as_ref(),
+        );
     }
 
-    /// `save_now` into a directory given by the caller, so a headless pass keeps its files to
-    /// itself even while another thread points the store somewhere else. Returns what landed.
-    pub fn save_now_to(&self, dir: &std::path::Path) -> std::io::Result<Vec<store::SavedTarget>> {
-        let saved: Vec<store::SavedTarget> = self
-            .targets
+    /// The targets in their file shape — everything `store` needs and nothing else.
+    pub fn saved_targets(&self) -> Vec<store::SavedTarget> {
+        self.targets
             .iter()
             .map(|t| store::SavedTarget {
                 id: t.id,
@@ -1313,7 +1476,14 @@ impl App {
                     .map(|s| (s.at_ms, s.rtt_ms))
                     .collect(),
             })
-            .collect();
+            .collect()
+    }
+
+    /// `save_now` into a directory given by the caller, so a headless pass keeps its files to
+    /// itself even while another thread points the store somewhere else. Returns what landed.
+    /// A headless pass has no window, so it never writes a geometry.
+    pub fn save_now_to(&self, dir: &std::path::Path) -> std::io::Result<Vec<store::SavedTarget>> {
+        let saved = self.saved_targets();
         store::save_to(dir, &self.options, &saved)?;
         Ok(saved)
     }
@@ -1331,17 +1501,102 @@ impl App {
         ))
     }
 
+    /// Ids of the targets that pass every filter: the text filter and the category switches in the
+    /// top bar. Chart, events list, statistics and the legend all draw exactly these, so "was ist
+    /// zu sehen" is decided in one place only. Hidden single targets stay in this list — the legend
+    /// has to keep drawing them so they can be switched back on.
     pub fn visible_targets(&self) -> Vec<usize> {
-        let f = self.filter.trim().to_lowercase();
         self.targets
             .iter()
-            .filter(|t| {
-                f.is_empty()
-                    || t.label.to_lowercase().contains(&f)
-                    || t.host.to_lowercase().contains(&f)
-            })
+            .filter(|t| self.passes_filter(t))
             .map(|t| t.id)
             .collect()
+    }
+
+    /// Does this target pass the text filter and the category switches? Says nothing about
+    /// [`Target::hidden`]: that is per-target presentation, handled by [`Self::shown`].
+    pub fn passes_filter(&self, t: &Target) -> bool {
+        if self.options.kinds_off.contains(&kind_index(t.kind)) {
+            return false;
+        }
+        let f = self.filter.trim().to_lowercase();
+        f.is_empty()
+            || t.label.to_lowercase().contains(&f)
+            || t.host.to_lowercase().contains(&f)
+            || t.kind.label().to_lowercase().contains(&f)
+    }
+
+    /// Is this target drawn right now — in the chart, the legend and the lists? It has to pass the
+    /// filters and must not have been hidden by a click on its name in the legend.
+    pub fn shown(&self, t: &Target) -> bool {
+        !t.hidden && self.passes_filter(t)
+    }
+
+    /// Ids of the targets [`Self::shown`] accepts — what the statistics table and the summary rows
+    /// count.
+    pub fn shown_target_ids(&self) -> Vec<usize> {
+        self.targets
+            .iter()
+            .filter(|t| self.shown(t))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Toggles the visibility of one target by id (a click on its name in the legend). Returns the
+    /// new state so the caller can report it.
+    pub fn toggle_hidden_by_id(&mut self, id: usize) -> bool {
+        if let Some(t) = self.targets.iter_mut().find(|t| t.id == id) {
+            t.hidden = !t.hidden;
+            t.hidden
+        } else {
+            false
+        }
+    }
+
+    /// How long a click on "Messwerte löschen" stays armed before the warning lapses. Long enough
+    /// to read the changed label and click again, short enough that a forgotten warning never
+    /// deletes anything.
+    const CLEAR_ARM_SECS: u64 = 5;
+
+    /// Drops an expired arming of the "Messwerte löschen" button. Called wherever the button is
+    /// drawn, so leaving the view or waiting too long disarms it.
+    pub fn expire_clear_armed(&mut self) {
+        if !self.clear_armed {
+            return;
+        }
+        let expired = self
+            .clear_at
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(Self::CLEAR_ARM_SECS));
+        if expired {
+            self.clear_armed = false;
+            self.clear_at = None;
+        }
+    }
+
+    /// Switches one category on or off, and reports what it is now. Returns the new state so the
+    /// caller can paint its chip accordingly.
+    pub fn toggle_kind(&mut self, kind: TargetKind) -> bool {
+        let i = kind_index(kind);
+        match self.options.kinds_off.iter().position(|&n| n == i) {
+            Some(pos) => {
+                self.options.kinds_off.remove(pos);
+                true
+            }
+            None => {
+                self.options.kinds_off.push(i);
+                false
+            }
+        }
+    }
+
+    /// Are all categories currently on? Used by the "alle" button in the filter row.
+    pub fn all_kinds_on(&self) -> bool {
+        self.options.kinds_off.is_empty()
+    }
+
+    /// Switches every category back on.
+    pub fn show_all_kinds(&mut self) {
+        self.options.kinds_off.clear();
     }
 
     /// Colour a status dot: the last measurement is what matters here.

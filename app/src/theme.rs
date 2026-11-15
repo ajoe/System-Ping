@@ -65,6 +65,11 @@ pub const PALETTE: &[Swatch] = &[
 /// How many automatic colours there are. The picker uses it to decide when to offer „Auto“.
 pub const PALETTE_LEN: usize = PALETTE.len();
 
+/// Size of a colour knob — the little square that says "this colour belongs to this line" in the
+/// chart legend, the target list and anywhere else a trace is named. One constant so every place
+/// draws the same size and the meaning never looks different from panel to panel.
+pub const LEGEND_KNOB: f32 = 10.0;
+
 /// Colour number `n` of the palette. A target stores this number instead of a colour, so the same
 /// target keeps its colour across restarts and both looks stay readable.
 pub fn swatch(n: usize) -> &'static Swatch {
