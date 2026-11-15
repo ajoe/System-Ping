@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 6 Unit-Tests + 9 Integrationstests (ohne GUI)
+cargo test                   # 7 Unit-Tests + 13 Integrationstests (ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 

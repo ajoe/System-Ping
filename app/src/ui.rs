@@ -64,11 +64,10 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                         }
                         if ui
                             .button(RichText::new(
-                                if app
-                                    .autostart_state
-                                    .load(std::sync::atomic::Ordering::Relaxed)
-                                    == 1
-                                {
+                                // `autostart_state()` is the registry's answer (looked up at
+                                // startup, then kept current); the raw counter alone would be
+                                // „aus“ until the user happens to press this button.
+                                if app.autostart_state() == Some(true) {
                                     "Autostart: an"
                                 } else {
                                     "Autostart: aus"
@@ -77,10 +76,7 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                             .on_hover_text("Beim Anmelden von Windows starten")
                             .clicked()
                         {
-                            let on = app
-                                .autostart_state
-                                .load(std::sync::atomic::Ordering::Relaxed)
-                                != 1;
+                            let on = app.autostart_state() != Some(true);
                             app.set_autostart(on);
                         }
                     }
@@ -652,7 +648,7 @@ fn nearest(t: &crate::app::Target, t_secs: f64) -> Option<history::Sample> {
         .min_by(|a, b| {
             ((a.t_secs - t_secs).abs())
                 .partial_cmp(&(b.t_secs - t_secs).abs())
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .copied()
 }
@@ -1163,6 +1159,7 @@ fn settings(ui: &mut Ui, app: &mut App) {
 
     if dirty {
         app.sync_caps();
+        app.sync_engine();
         // Save on the next tick.
         app.save_now();
     }

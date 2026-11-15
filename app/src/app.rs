@@ -203,7 +203,9 @@ pub struct App {
     // Background work handoff
     pending_export: Arc<AtomicBool>,
     export_result: Arc<MutexSlot<String>>,
-    pub autostart_state: Arc<AtomicUsize>,
+    /// Registry answer for the autostart entry, written by a background thread. Read through
+    /// `autostart_state()`, which turns „not yet looked up“ into `None`.
+    autostart_state: Arc<AtomicUsize>,
 
     pub status_msg: String,
     /// Scratch buffer for the per-frame p95 scan in [`ui::chart`], so the chart doesn't
@@ -521,6 +523,9 @@ impl App {
             }
         }
         app.sync_caps();
+        // Ask Windows once, in the background, whether a Run entry exists. Until it answers the
+        // button shows „aus“; afterwards `poll_autostart` keeps it honest.
+        app.check_autostart_once();
         app
     }
 
@@ -529,6 +534,13 @@ impl App {
         for t in &mut self.targets {
             t.series.set_cap(cap);
         }
+    }
+
+    /// Hand settings the engine owns over to it. Called whenever the settings panel reports a
+    /// change, so „Gleichzeitige Prüfungen“ takes effect immediately instead of on the next
+    /// launch. The engine clamps the number itself.
+    pub fn sync_engine(&mut self) {
+        self.engine.set_concurrency(self.options.concurrency);
     }
 
     pub fn selected_target(&self) -> Option<&Target> {
@@ -546,6 +558,12 @@ impl App {
         for r in results {
             self.apply_result(r);
         }
+
+        // A finished CSV export reports itself here; nothing else picks the message up, and
+        // without this the status bar would read „Schreibe CSV-Datei …“ forever.
+        self.take_export_result();
+        // Same for the autostart lookup that started at launch.
+        self.poll_autostart();
 
         if !self.running {
             return;
@@ -929,16 +947,18 @@ impl App {
         }
     }
 
-    /// Ask the background thread whether the autostart entry exists.
+    /// Ask the background thread whether the autostart entry exists, and correct the option if
+    /// the registry disagrees with what we assumed. Called once per frame from `tick`. The value
+    /// is kept in the atomic so the top-bar button can read it every frame; this function only
+    /// updates `options.autostart` when the answer arrives for the first time.
     pub fn poll_autostart(&mut self) {
         let v = self.autostart_state.load(Ordering::Acquire);
         if v == usize::MAX {
             return;
         }
-        // Read once and reset.
-        self.autostart_state.store(usize::MAX, Ordering::Release);
-        let wanted = self.options.autostart;
+        // The value stays in place — the button reads it every frame. We only sync options once.
         let found = v == 1;
+        let wanted = self.options.autostart;
         if wanted != found {
             self.options.autostart = found;
             self.status_msg = if found {
@@ -949,8 +969,22 @@ impl App {
         }
     }
 
-    /// `Some(true)` / `Some(false)` once the registry has answered, `None` while
-    /// the check is still running.
+    /// Start the registry lookup in the background. Only ever run once at startup: after that
+    /// the button owns the value, and asking again would overwrite what the user just clicked.
+    pub fn check_autostart_once(&self) {
+        let slot = Arc::clone(&self.autostart_state);
+        std::thread::spawn(move || {
+            let found = autostart_exists();
+            slot.store(if found { 1 } else { 0 }, Ordering::Release);
+        });
+    }
+
+    /// Whether the autostart entry exists. `Some(true)` / `Some(false)` once the registry has
+    /// answered, `None` while the check is still running. Unlike the other one-shot results this
+    /// value is *kept* — the top-bar button reads it every frame, so consuming it would make the
+    /// label flicker. `poll_autostart()` is what consumes it to correct `options.autostart`.
+    /// `pub` rather than `pub(crate)`: the integration tests in `tests/` compile against the
+    /// crate as an outside user and must see the same answer the button sees.
     pub fn autostart_state(&self) -> Option<bool> {
         match self.autostart_state.load(Ordering::Acquire) {
             usize::MAX => None,
@@ -1167,6 +1201,34 @@ fn set_autostart(on: bool) -> bool {
     #[cfg(not(windows))]
     {
         let _ = on;
+        false
+    }
+}
+
+/// Whether the HKCU Run entry that starts the app at logon exists. This is the read side of
+/// `set_autostart`; without it the button in the top bar can only ever say „aus“, because the
+/// counter it reads is only ever written when the user presses it.
+fn autostart_exists() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `reg query` exits 0 only when the value is really there, so its status is the whole
+        // answer — no registry crate needed.
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "SystemPing",
+        ]);
+        cmd.creation_flags(0x0800_0000);
+        // The answer is not interesting, only whether the key was found.
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
         false
     }
 }

@@ -213,11 +213,11 @@ impl ProtocolFile {
                         ProtocolFormat::Csv => "timestamp,target,latency_ms,status\n",
                         ProtocolFormat::Text => "# Ping-Protokoll: Zeit, Ziel, Antwortzeit\n",
                     };
-                    let _ = writeln!(
-                        self.file.as_mut().unwrap(),
-                        "{}",
-                        header.trim_end_matches('\n')
-                    );
+                    // `self.file` was just set to `Some(f)` two lines above, so the write can
+                    // only fail on an I/O error. No need for unwrap_or_default or expect.
+                    if let Some(ref mut file) = self.file {
+                        let _ = writeln!(file, "{}", header.trim_end_matches('\n'));
+                    }
                 }
             }
             Err(e) => self.failed = Some(format!("{}: {}", self.path.display(), e)),
