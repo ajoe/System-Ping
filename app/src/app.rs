@@ -227,6 +227,18 @@ pub struct App {
     pub stats_scratch: Vec<f32>,
     /// Last theme the widgets were drawn for, so a switch re-tints everything.
     pub theme_mode: crate::theme::Mode,
+    /// The click area of every row in the target list, as reported by [`ui::left_body`] during
+    /// the last pass. Only consumer is the click test, which needs it to aim a synthetic mouse
+    /// at a real row instead of guessing coordinates.
+    pub row_rects: Vec<egui::Rect>,
+    /// Line spacing inside a target row's label block, reported by [`ui::left_body`]. Together
+    /// with [`Self::row_rects`] it lets the click test aim at the gap between the two lines —
+    /// the only spot in a row that no label covers.
+    pub row_label_gap: f32,
+    /// Height of every row in the target list from the last pass. While a row is being edited its
+    /// frame is replaced by a much taller form; remembering the old height keeps that row's click
+    /// area where it was, so the rows below it do not move out from under the mouse.
+    pub row_heights: Vec<f32>,
 }
 
 impl App {
@@ -492,6 +504,9 @@ impl App {
             ),
             chart_p95: Vec::new(),
             stats_scratch: Vec::new(),
+            row_rects: Vec::new(),
+            row_label_gap: 0.0,
+            row_heights: Vec::new(),
             protocol: if protocol_on {
                 let path = if trimmed_path.is_empty() {
                     store::state_dir().join("protocol.csv")
@@ -911,12 +926,20 @@ impl App {
         self.add_target();
     }
 
+    /// The click areas of the rows, in target order, as egui saw them in the last pass. The click
+    /// test uses them to aim a synthetic pointer at a row; `ui::left_body()` fills them.
+    pub fn row_rects(&self) -> &[egui::Rect] {
+        &self.row_rects
+    }
+
     /// Open the inline editor for a target. Called when a row in the left panel is clicked, so a
-    /// single click is enough to reach the settings. Any row that was being edited is committed
-    /// first, otherwise switching rows would silently throw away what the user typed.
+    /// single click is enough to reach the settings.
+    ///
+    /// An editor that was already open is saved first, so switching rows never loses an edit. The
+    /// commit closes the editor, which is why it has to happen before the new row is loaded here.
     pub fn begin_edit(&mut self, idx: usize) {
-        if self.edit_idx.is_some() {
-            self.commit_edit();
+        if self.targets.get(idx).is_some() {
+            self.close_edit();
         }
         if let Some(t) = self.targets.get(idx) {
             self.selected = idx;

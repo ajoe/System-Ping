@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 7 Unit-Tests + 22 Integrationstests (ohne GUI)
+cargo test                   # 7 Unit-Tests + 25 Integrationstests (ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -37,7 +37,9 @@ Ziele werden über das Einstellungsfeld angelegt (Name + Host). Der Standard-Gat
 beim ersten Start aus `ipconfig`/`route` geraten. Ein **Klick** auf ein Ziel in der
 linken Liste öffnet den Inline-Editor: Name, Adresse, Kategorie und ob gemessen wird. Enter
 oder „✓ Speichern“ übernimmt, Escape oder „✗ Abbrechen“ verwirft. Der Editor zeigt außerdem
-die Details des Ziels (Messwerte, ø, min/max, Verluste im sichtbaren Zeitfenster).
+die Details des Ziels (Messwerte, ø, min/max, Verluste im sichtbaren Zeitfenster). Ein zweiter
+Klick auf dasselbe Ziel lässt den Editor samt Eingabe stehen; schließen tun nur Abbrechen,
+Escape, Speichern oder ein Klick auf eine andere Zeile — dabei wird vorher gespeichert.
 
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der

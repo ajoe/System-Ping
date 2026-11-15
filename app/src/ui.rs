@@ -3,7 +3,7 @@
 use crate::app::{App, TargetKind, View};
 use crate::history;
 use crate::theme::{self, Mode};
-use egui::{Color32, FontId, Label, RichText, ScrollArea, Stroke, Ui, Vec2};
+use egui::{Color32, FontId, Label, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
 use std::path::PathBuf;
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
@@ -136,8 +136,8 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
         });
 }
 
+/// The left panel: heading, count, and one row per target.
 pub fn left(ctx: &egui::Context, app: &mut App) {
-    let m = app.theme_mode;
     egui::SidePanel::left("targets")
         .exact_width(250.0)
         .frame(
@@ -145,241 +145,294 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
                 .fill(ctx.style().visuals.panel_fill)
                 .inner_margin(egui::Margin::same(8)),
         )
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Ziele").strong());
-                let vis = app.visible_targets().len();
-                ui.label(RichText::new(format!("{}/{}", vis, app.targets.len())).weak());
-            });
-            ui.separator();
+        .show(ctx, |ui| left_body(ui, app));
+}
 
-            let now = app.engine.elapsed_secs();
-            // Reused scratch buffer for the per-target statistics shown in the editor.
-            let mut scratch = std::mem::take(&mut app.stats_scratch);
+/// Which of the rows built by [`left_body`] a plain left click belongs to, if any. That function
+/// is defined further down.
+/// Which of the rows built by `left_body()` a plain left click belongs to, if any.
+///
+/// A target row cannot use the ordinary `response.clicked()`: egui's `Frame::show` registers its
+/// area with `Sense::hover()` only (see `tests/frame_click.rs`), so a row never reports a click of
+/// its own. The decision therefore uses the rects the rows reported in the previous pass together
+/// with egui's own pointer state — the same two ingredients `clicked_elsewhere()` is built from,
+/// just without the per-area response that a hover-only frame never delivers.
+///
+/// Both the press and the release have to lie inside the row. Reading only the release position
+/// would be wrong: when a click opens an editor, the list relayouts and the very next pass already
+/// reports different rects, so the pointer of the click that opened it would be judged against
+/// geometry that did not exist when the mouse was pressed.
+///
+/// `rects` are the row click areas from `App::row_rects`, so this only ever answers after a first
+/// layout pass — which is also true of a real click, since egui has to have drawn the rows before
+/// anyone can aim at them. A click on a control outside the list — a button, a combo box — lands in
+/// no row and returns `None`, which keeps those controls working normally.
+pub fn clicked_in_row(ctx: &egui::Context, rects: &[Rect]) -> Option<usize> {
+    // Only a finished primary press+release counts; a drag of the panel border must not edit.
+    let pointer = ctx.input(|i| {
+        if i.pointer.any_click() {
+            i.pointer.interact_pos()
+        } else {
+            None
+        }
+    })?;
+    rects.iter().position(|rect| rect.contains(pointer))
+}
 
-            ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Collect actions first to avoid borrow conflicts.
-                    let mut edit_action: Option<fn(&mut App)> = None;
-                    let mut begin_edit_idx: Option<usize> = None;
+/// The panel's contents on their own. Tests call this directly so they can place the panel
+/// somewhere they control and click a row with a synthetic pointer.
+pub fn left_body(ui: &mut Ui, app: &mut App) {
+    // Which row the current click belongs to, decided once before the rows are built. The rects
+    // come from the previous pass; a real click always follows a pass that drew the rows.
+    let clicked_row = clicked_in_row(ui.ctx(), &app.row_rects);
+    // A click inside one of the editor's own controls (a text field, the combo box, a button) must
+    // not be mistaken for "this row was clicked again", so that case is ignored here. The editor
+    // only closes through its buttons, Enter/Esc, or a click on another row.
+    let clicked_row = match clicked_row {
+        Some(row) if app.edit_idx == Some(row) => None,
+        other => other,
+    };
+    let m = app.theme_mode;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Ziele").strong());
+        let vis = app.visible_targets().len();
+        ui.label(RichText::new(format!("{}/{}", vis, app.targets.len())).weak());
+    });
+    ui.separator();
 
-                    for (idx, t) in app.targets.iter().enumerate() {
-                        let color = app.status_color(t);
-                        let txt = app.status_text(t);
-                        let sel = app.selected == idx;
-                        let editing_here = app.edit_idx == Some(idx);
-                        let secs_ago = if t.last_probe_secs > 0.0 {
-                            now - t.last_probe_secs
-                        } else {
-                            -1.0
-                        };
+    let now = app.engine.elapsed_secs();
+    // Reused scratch buffer for the per-target statistics shown in the editor.
+    let mut scratch = std::mem::take(&mut app.stats_scratch);
 
-                        // While a row is being edited, show its settings instead of the label.
-                        if editing_here {
-                            // Details for this one target: how much history is kept, and what it
-                            // says about the current window.
-                            let horizon = app.options.horizon_secs as f64;
-                            let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
-                            let st = t.series.stats_window(from, f64::MAX, &mut scratch);
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Collect actions first to avoid borrow conflicts.
+            let mut edit_action: Option<fn(&mut App)> = None;
+            let mut begin_edit_idx: Option<usize> = None;
+            // Filled with every row's click area while the rows are built, then handed to
+            // `app.row_rects` below. A test needs those rects to aim a synthetic click.
+            let mut row_rects = Vec::new();
+            let mut row_heights = Vec::new();
 
-                            // The panel is only 250 px wide, so the editor has to stay tight.
-                            ui.style_mut().spacing.item_spacing.y = 3.0;
+            for (idx, t) in app.targets.iter().enumerate() {
+                let color = app.status_color(t);
+                let txt = app.status_text(t);
+                let sel = app.selected == idx;
+                let editing_here = app.edit_idx == Some(idx);
+                let secs_ago = if t.last_probe_secs > 0.0 {
+                    now - t.last_probe_secs
+                } else {
+                    -1.0
+                };
 
-                            let frame = egui::Frame::new()
-                                .fill(m.row_fill(true))
-                                .corner_radius(5.0)
-                                .inner_margin(egui::Margin::symmetric(7, 6));
-                            frame.show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let (dot_rect, _) = ui.allocate_exact_size(
-                                        Vec2::splat(11.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    let dot_rect = dot_rect.shrink(1.5);
-                                    ui.painter().rect_filled(dot_rect, 5.5, color);
-                                    ui.label(RichText::new("Bearbeiten").strong().size(12.0));
+                // While a row is being edited, show its settings instead of the label. The editor
+                // is deliberately *not* one of `row_rects`: it is a form with real controls, and a
+                // click on one of them must never be read as "this row was clicked again".
+                if editing_here {
+                    // Keep the row's click area alive while it is being edited. It has to cover
+                    // exactly the same spot as before, otherwise the list would shift and a click
+                    // aimed at a neighbour would land somewhere else. `clicked_in_row` ignores a
+                    // click on the row that is already open, so the editor's own controls are safe.
+                    let h = app.row_heights.get(idx).copied().unwrap_or(39.0);
+                    let (rect, _) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), h),
+                        egui::Sense::hover(),
+                    );
+                    row_rects.push(rect);
 
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui
-                                                .small_button("✕")
-                                                .on_hover_text("Änderungen verwerfen (Esc)")
-                                                .clicked()
-                                            {
-                                                edit_action = Some(App::cancel_edit);
-                                            }
-                                        },
-                                    );
-                                });
+                    // Details for this one target: how much history is kept, and what it
+                    // says about the current window.
+                    let horizon = app.options.horizon_secs as f64;
+                    let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
+                    let st = t.series.stats_window(from, f64::MAX, &mut scratch);
 
-                                // Name and address.
-                                ui.add_sized(
-                                    [215.0, 20.0],
-                                    egui::TextEdit::singleline(&mut app.edit_label)
-                                        .hint_text("Name (optional)")
-                                        .vertical_align(egui::Align::Center),
-                                );
-                                ui.add_sized(
-                                    [215.0, 20.0],
-                                    egui::TextEdit::singleline(&mut app.edit_host)
-                                        .hint_text("Adresse")
-                                        .font(FontId::monospace(12.5))
-                                        .vertical_align(egui::Align::Center),
-                                );
+                    // The panel is only 250 px wide, so the editor has to stay tight.
+                    ui.style_mut().spacing.item_spacing.y = 3.0;
 
-                                // Category and whether to measure it at all.
-                                ui.horizontal(|ui| {
-                                    egui::ComboBox::from_id_salt("edit_kind")
-                                        .width(96.0)
-                                        .selected_text(RichText::new(app.edit_kind.label()).size(12.0))
-                                        .show_ui(ui, |ui| {
-                                            for k in TargetKind::all() {
-                                                ui.selectable_value(
-                                                    &mut app.edit_kind,
-                                                    k,
-                                                    k.label(),
-                                                );
-                                            }
-                                        });
-                                    ui.add_enabled_ui(!app.edit_host.trim().is_empty(), |ui| {
-                                        ui.checkbox(&mut app.edit_enabled, "misst")
-                                            .on_hover_text(
-                                                "Aus schaltet die Messung ab, der Verlauf bleibt erhalten",
-                                            );
-                                    });
-                                });
+                    let frame = egui::Frame::new()
+                        .fill(m.row_fill(true))
+                        .corner_radius(5.0)
+                        .inner_margin(egui::Margin::symmetric(7, 6));
+                    frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (dot_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
+                            let dot_rect = dot_rect.shrink(1.5);
+                            ui.painter().rect_filled(dot_rect, 5.5, color);
+                            ui.label(RichText::new("Bearbeiten").strong().size(12.0));
 
-                                // Details: what the stored history says about this target.
-                                let avg = if st.replies > 0 {
-                                    format!("ø {} ms", crate::app::fmt_ms(st.avg as f32))
-                                } else {
-                                    "ø —".to_string()
-                                };
-                                let span = if st.replies > 0 {
-                                    format!(
-                                        "{} / {} ms",
-                                        crate::app::fmt_ms(st.min),
-                                        crate::app::fmt_ms(st.max)
-                                    )
-                                } else {
-                                    "— / — ms".to_string()
-                                };
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} · {}",
-                                        t.kind.label(),
-                                        if t.enabled { "aktiv" } else { "pausiert" }
-                                    ))
-                                    .weak()
-                                    .size(11.0),
-                                );
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{}/{} Werte · {}",
-                                        st.replies, st.total, avg
-                                    ))
-                                    .weak()
-                                    .size(11.0)
-                                    .monospace(),
-                                );
-                                ui.label(
-                                    RichText::new(format!("{} · {} Verluste", span, st.losses))
-                                        .weak()
-                                        .size(11.0)
-                                        .monospace(),
-                                );
-
-                                ui.horizontal(|ui| {
-                                    if ui.button("✓ Speichern").clicked() {
-                                        edit_action = Some(App::commit_edit);
-                                    }
-                                    if ui.button("✗ Abbrechen").clicked() {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("✕")
+                                        .on_hover_text("Änderungen verwerfen (Esc)")
+                                        .clicked()
+                                    {
                                         edit_action = Some(App::cancel_edit);
                                     }
+                                },
+                            );
+                        });
+
+                        // Name and address.
+                        ui.add_sized(
+                            [215.0, 20.0],
+                            egui::TextEdit::singleline(&mut app.edit_label)
+                                .hint_text("Name (optional)")
+                                .vertical_align(egui::Align::Center),
+                        );
+                        ui.add_sized(
+                            [215.0, 20.0],
+                            egui::TextEdit::singleline(&mut app.edit_host)
+                                .hint_text("Adresse")
+                                .font(FontId::monospace(12.5))
+                                .vertical_align(egui::Align::Center),
+                        );
+
+                        // Category and whether to measure it at all.
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("edit_kind")
+                                .width(96.0)
+                                .selected_text(RichText::new(app.edit_kind.label()).size(12.0))
+                                .show_ui(ui, |ui| {
+                                    for k in TargetKind::all() {
+                                        ui.selectable_value(&mut app.edit_kind, k, k.label());
+                                    }
                                 });
-
-                                // Enter commits, Escape cancels.
-                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                if enter {
-                                    edit_action = Some(App::commit_edit);
-                                } else if escape {
-                                    edit_action = Some(App::cancel_edit);
-                                }
-                            });
-                            continue;
-                        }
-
-                        let frame = egui::Frame::new()
-                            .fill(m.row_fill(sel))
-                            .corner_radius(5.0)
-                            .inner_margin(egui::Margin::symmetric(7, 5));
-                        let resp = frame.show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let (dot_rect, _) =
-                                    ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
-                                let dot_rect = dot_rect.shrink(1.5);
-                                ui.painter().rect_filled(dot_rect, 5.5, color);
-
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 1.0;
-                                    ui.add(
-                                        Label::new(RichText::new(&t.label).strong().size(13.0))
-                                            .selectable(false),
-                                    );
-                                    let age = if secs_ago < 0.0 {
-                                        "noch nicht geprüft".to_string()
-                                    } else {
-                                        format!("vor {} s", secs_ago.max(0.0) as i64)
-                                    };
-                                    ui.add(
-                                        Label::new(
-                                            RichText::new(format!("{} · {}", t.host, age))
-                                                .weak()
-                                                .size(11.0),
-                                        )
-                                        .selectable(false),
-                                    );
-                                });
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(
-                                            Label::new(
-                                                RichText::new(&txt)
-                                                    .color(color)
-                                                    .monospace()
-                                                    .size(12.0),
-                                            )
-                                            .selectable(false),
-                                        );
-                                    },
+                            ui.add_enabled_ui(!app.edit_host.trim().is_empty(), |ui| {
+                                ui.checkbox(&mut app.edit_enabled, "misst").on_hover_text(
+                                    "Aus schaltet die Messung ab, der Verlauf bleibt erhalten",
                                 );
                             });
                         });
 
-                        if resp.response.clicked() || resp.response.double_clicked() {
-                            // A click both selects the row and opens its editor, so the settings
-                            // are one click away. The double-click case is folded in because egui
-                            // reports it separately from `clicked`.
-                            begin_edit_idx = Some(idx);
-                        }
-                    }
+                        // Details: what the stored history says about this target.
+                        let avg = if st.replies > 0 {
+                            format!("ø {} ms", crate::app::fmt_ms(st.avg as f32))
+                        } else {
+                            "ø —".to_string()
+                        };
+                        let span = if st.replies > 0 {
+                            format!(
+                                "{} / {} ms",
+                                crate::app::fmt_ms(st.min),
+                                crate::app::fmt_ms(st.max)
+                            )
+                        } else {
+                            "— / — ms".to_string()
+                        };
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                t.kind.label(),
+                                if t.enabled { "aktiv" } else { "pausiert" }
+                            ))
+                            .weak()
+                            .size(11.0),
+                        );
+                        ui.label(
+                            RichText::new(format!("{}/{} Werte · {}", st.replies, st.total, avg))
+                                .weak()
+                                .size(11.0)
+                                .monospace(),
+                        );
+                        ui.label(
+                            RichText::new(format!("{} · {} Verluste", span, st.losses))
+                                .weak()
+                                .size(11.0)
+                                .monospace(),
+                        );
 
-                    // Now apply the actions after the loop, when `app` is no longer borrowed.
-                    if let Some(idx) = begin_edit_idx {
-                        app.begin_edit(idx);
-                    }
-                    if let Some(action) = edit_action {
-                        action(app);
-                    }
+                        ui.horizontal(|ui| {
+                            if ui.button("✓ Speichern").clicked() {
+                                edit_action = Some(App::commit_edit);
+                            }
+                            if ui.button("✗ Abbrechen").clicked() {
+                                edit_action = Some(App::cancel_edit);
+                            }
+                        });
+
+                        // Enter commits, Escape cancels.
+                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        if enter {
+                            edit_action = Some(App::commit_edit);
+                        } else if escape {
+                            edit_action = Some(App::cancel_edit);
+                        }
+                    });
+                    continue;
+                }
+
+                let frame = egui::Frame::new()
+                    .fill(m.row_fill(sel))
+                    .corner_radius(5.0)
+                    .inner_margin(egui::Margin::symmetric(7, 5));
+                // The labels are explicitly not selectable: selecting text is not what a row is for,
+                // and a selectable label senses clicks, which would let it swallow the press that
+                // belongs to the row. With every label on `Sense::hover()` the whole row stays one
+                // click target.
+                let resp = frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (dot_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
+                        let dot_rect = dot_rect.shrink(1.5);
+                        ui.painter().rect_filled(dot_rect, 5.5, color);
+
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.add(
+                                Label::new(RichText::new(&t.label).strong().size(13.0))
+                                    .selectable(false),
+                            );
+                            let age = if secs_ago < 0.0 {
+                                "noch nicht geprüft".to_string()
+                            } else {
+                                format!("vor {} s", secs_ago.max(0.0) as i64)
+                            };
+                            ui.add(
+                                Label::new(
+                                    RichText::new(format!("{} · {}", t.host, age))
+                                        .weak()
+                                        .size(11.0),
+                                )
+                                .selectable(false),
+                            );
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(
+                                Label::new(RichText::new(&txt).color(color).monospace().size(12.0))
+                                    .selectable(false),
+                            );
+                        });
+                    });
                 });
 
-            app.stats_scratch = scratch;
+                // The click area of the row: `Frame::show` registers its area with `Sense::hover()`
+                // only, so this is the rect that says where a row is. It is stored on the app and
+                // used by `clicked_in_row` (and by the click test) on the next pass.
+                row_rects.push(resp.response.rect);
+                row_heights.push(resp.response.rect.height());
+                if clicked_row == Some(idx) {
+                    begin_edit_idx = Some(idx);
+                }
+            }
+
+            // Now apply the actions after the loop, when `app` is no longer borrowed.
+            if let Some(idx) = begin_edit_idx {
+                app.begin_edit(idx);
+            }
+            if let Some(action) = edit_action {
+                action(app);
+            }
+            app.row_rects = row_rects;
+            app.row_heights = row_heights;
         });
+
+    app.stats_scratch = scratch;
 }
 
 pub fn bottom(ctx: &egui::Context, app: &mut App) {
@@ -1242,6 +1295,9 @@ fn settings(ui: &mut Ui, app: &mut App) {
                         app.reset_stats();
                     }
                     if ui.button("Ziel entfernen").clicked() {
+                        // Removing a target would shift the index the inline editor points at, so
+                        // any open editor is committed first.
+                        app.close_edit();
                         app.remove_selected();
                     }
                 });
