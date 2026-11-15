@@ -29,10 +29,25 @@ system-ping.exe                       Fenster öffnen
 system-ping.exe --export-csv <datei>  gespeicherten Verlauf als CSV exportieren und beenden
 system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart|stats|events|settings)
 system-ping.exe --theme <hell|dunkel>  Aussehen für diese Sitzung überschreiben
+system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausgeben, beenden
 ```
 
 Ziele werden über das Einstellungsfeld angelegt (Name + Host). Der Standard-Gateway wird
 beim ersten Start aus `ipconfig`/`route` geraten.
+
+Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
+einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der
+Weg, die Messung ohne Blick auf den Bildschirm zu prüfen:
+
+```
+$ app\target\release\system-ping.exe --collect 10
+collect: Gateway        192.168.178.1        samples=5 antworten=5 letzte=1.0 ms
+collect: DNS (Google)   8.8.8.8              samples=5 antworten=5 letzte=13.0 ms
+collect: Internet       1.1.1.1              samples=5 antworten=5 letzte=10.0 ms
+collect: 15 Messwerte in dieser Zeit, davon 15 Antworten
+```
+
+Der Lauf speichert sein Ergebnis, also zeigt `--export-csv` direkt danach dieselben Werte.
 
 ## Zustand und Dateien
 
