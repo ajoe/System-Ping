@@ -54,6 +54,27 @@ fn theme_override_from_args() -> Option<String> {
     None
 }
 
+/// Command line: `--collect <secs>` runs the real window for a while, prints how many samples
+/// the live loop actually recorded, and exits. This is the check that a GUI run measures at all:
+/// before the frame loop called `tick`, such a run reported zero samples forever.
+fn collect_secs_from_args() -> Option<f64> {
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        if let Some(rest) = a
+            .strip_prefix("--collect=")
+            .or_else(|| a.strip_prefix("--collect-secs="))
+        {
+            return rest.parse::<f64>().ok();
+        }
+        if a == "--collect" || a == "--collect-secs" {
+            if let Some(v) = it.next().and_then(|v| v.parse::<f64>().ok()) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 fn main() -> eframe::Result<()> {
     // Load saved settings before the window exists.
     let (options, saved) = store::load();
@@ -75,6 +96,13 @@ fn main() -> eframe::Result<()> {
     }
 
     let shot = screenshot_path_from_args();
+    // `--collect <secs>` keeps the window live for a while and then reports what it measured.
+    let collect = collect_secs_from_args();
+    // `--max-frames <n>` is a safety net for automated runs: without it eframe would keep an
+    // invisible window open forever if the self-test ever stopped closing its own window.
+    let limit = std::env::var("SYSTEM_PING_MAX_FRAMES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok());
     // A command-line theme wins over the saved one (used to check both looks). It is passed
     // to the app as an override so it never gets written back to the state file.
     let theme_override = theme_override_from_args();
@@ -120,7 +148,12 @@ fn main() -> eframe::Result<()> {
                 );
                 // Paint the chosen look before the first frame is drawn.
                 system_ping::theme::apply(&cc.egui_ctx, a.theme_mode);
-                Ok(Box::new(a))
+                match collect {
+                    Some(secs) => Ok(Box::new(system_ping::screenshot::SelfTest::new(
+                        a, cc, secs, limit,
+                    ))),
+                    None => Ok(Box::new(a)),
+                }
             }),
         ),
     }

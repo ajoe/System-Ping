@@ -215,6 +215,22 @@ pub struct App {
     pub theme_mode: crate::theme::Mode,
 }
 
+impl App {
+    /// One frame of the live window: advance the engine, then paint. This is the whole
+    /// measurement loop of the GUI — `tick` is what schedules probes and moves results into
+    /// the series the chart draws, so a frame that skips it paints an empty plot forever.
+    /// It lives here (and not only in `eframe::App::update`) so a test can drive a real frame
+    /// without a window.
+    pub fn frame(&mut self, ctx: &egui::Context) {
+        let now = self.engine.elapsed_secs();
+        self.tick(now);
+        crate::ui::draw(ctx, self);
+        // A live monitor repaints even when nobody touches it: samples arrive on their own,
+        // and egui would otherwise sit idle until the next mouse event.
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let want = crate::theme::resolve(ctx, &self.options.theme);
@@ -222,7 +238,7 @@ impl eframe::App for App {
             self.theme_mode = want;
             crate::theme::apply(ctx, want);
         }
-        crate::ui::draw(ctx, self);
+        self.frame(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

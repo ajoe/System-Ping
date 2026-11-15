@@ -256,6 +256,85 @@ impl eframe::App for Screencap {
     }
 }
 
+/* ------------------------------------------------------------------ self test */
+
+/// Runs the live window for a fixed number of seconds and then reports what it measured.
+/// This exists so "does the GUI actually record anything?" can be answered from a script
+/// instead of by watching a screen: `--collect 12` prints one line per target and closes the
+/// window. It also starts the measurement, because the window itself waits for the user to
+/// press „Alle starten", and it saves on the way out so `--export-csv` can show the same run.
+pub struct SelfTest {
+    app: App,
+    until_secs: f64,
+    frames_left: u32,
+    reported: bool,
+}
+
+impl SelfTest {
+    pub fn new(mut app: App, cc: &CreationContext<'_>, secs: f64, max_frames: Option<u32>) -> Self {
+        // The same look the plain window would get, so the run exercises the live theme path.
+        let want = crate::theme::resolve(&cc.egui_ctx, &app.options.theme);
+        app.theme_mode = want;
+        crate::theme::apply(&cc.egui_ctx, want);
+        app.start();
+        Self {
+            app,
+            until_secs: crate::runtime::secs_since_start() + secs.max(1.0),
+            // Without a limit an invisible window would sit in the event loop forever.
+            frames_left: max_frames.unwrap_or(u32::MAX),
+            reported: false,
+        }
+    }
+}
+
+impl eframe::App for SelfTest {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The real frame of the real window.
+        self.app.frame(ctx);
+
+        self.frames_left = self.frames_left.saturating_sub(1);
+        let time_up = crate::runtime::secs_since_start() >= self.until_secs;
+        if !self.reported && (time_up || self.frames_left == 0) {
+            self.reported = true;
+            // Every target says what it saw, so a probe that resolves but never answers is
+            // visible here as well — a plain sample count would hide that. `antworten` counts
+            // the replies: a run that only recorded timeouts would otherwise look healthy.
+            let mut ok_samples = 0usize;
+            for t in &self.app.targets {
+                let last = t.series.last();
+                let ok = t
+                    .series
+                    .samples()
+                    .iter()
+                    .filter(|s| crate::history::is_ok(s.rtt_ms))
+                    .count();
+                ok_samples += ok;
+                println!(
+                    "collect: {:<14} {:<20} samples={} antworten={} letzte={}",
+                    t.label,
+                    t.host,
+                    t.series.len(),
+                    ok,
+                    match last {
+                        Some(s) if crate::history::is_ok(s.rtt_ms) => format!("{:.1} ms", s.rtt_ms),
+                        Some(_) => "Timeout".to_string(),
+                        None => "-".to_string(),
+                    }
+                );
+            }
+            let total: usize = self.app.targets.iter().map(|t| t.series.len()).sum();
+            println!(
+                "collect: {} Messwerte in dieser Zeit, davon {} Antworten",
+                total, ok_samples
+            );
+            // Written down before the window goes away, so a follow-up `--export-csv` reads
+            // exactly what this run measured.
+            self.app.save_now();
+            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ raster */
 
 fn capture(

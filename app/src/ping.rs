@@ -328,8 +328,11 @@ fn host_is_safe(host: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
 }
 
+/// Exposed for the integration tests, which ask it through `probe_blocking` — "does this host
+/// answer?" — using exactly the app's own rules. A private helper there would have to
+/// re-implement the parsing, and a bug in both places at once would then look like a pass.
 #[cfg(windows)]
-fn probe_windows(job: &ProbeJob) -> Result<f32, ProbeFail> {
+pub fn probe_windows(job: &ProbeJob) -> Result<f32, ProbeFail> {
     // `ping -n 1` sends one echo request; `-w` is the per-reply timeout in ms.
     let mut cmd = Command::new("ping");
     cmd.args(["-n", "1", "-w"]);
@@ -443,14 +446,38 @@ fn classify_failure(text: &str) -> ProbeFail {
     }
 }
 
-/// Pull `time=42ms` / `time=1.2ms` (and the German `Zeit=`) out of ping output.
+/// The value used for a reply that `ping.exe` prints as `<1ms`. It has to be a positive
+/// number so the chart and the loss statistics treat it as an answer, not a timeout.
+pub const SUB_MS_RTT: f32 = 0.5;
+
+/// Pull `time=42ms` / `time=1.2ms` (and the German `Zeit=…`) out of ping output.
+///
+/// The reply time is always printed as `<word><separator><number>ms`, but both parts differ by
+/// language: English uses `time=42ms`, German `Zeit=14ms`, and a sub-millisecond reply becomes
+/// `Zeit<1ms` / `time<1ms` with no digits of its own. So the scan looks for the time word and
+/// then skips whatever separator follows it, instead of insisting on one exact spelling.
 fn parse_rtt(text: &str, markers: &[&str]) -> Option<f32> {
     for line in text.lines() {
         for marker in markers {
-            if let Some(pos) = line.find(marker) {
+            // Match the time word only: `time=` / `Zeit=` are both `<word><separator>`, and a
+            // reply under a millisecond uses `<` instead of `=`, so the separator cannot be part
+            // of the search string.
+            let word = marker.trim_end_matches(['=', ' ']);
+            let mut from = 0usize;
+            // One reply line can carry the marker more than once; keep scanning so a marker in
+            // front of prose never hides the number behind it.
+            while let Some(rel) = line[from..].find(word) {
+                let pos = from + rel + word.len();
+                from = pos;
+                // `Zeit<1ms`: a reply faster than a millisecond prints with a `<` where the
+                // digits would start, so report "under one" rather than a lost packet.
+                if line[pos..].starts_with('<') {
+                    return Some(SUB_MS_RTT);
+                }
+                // Skip the separator (`=`, or nothing at all in some locales) before the number.
+                let tail = &line[pos..].trim_start_matches(['=', ' ']);
                 // Read the number straight out of the line instead of collecting it into a
                 // String first; only a decimal comma needs replacing before parsing.
-                let tail = &line[pos + marker.len()..];
                 let end = tail
                     .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))
                     .unwrap_or(tail.len());
@@ -481,6 +508,18 @@ pub fn fail_label(f: ProbeFail) -> &'static str {
     }
 }
 
+/// How long a probe of `host` took, using the real OS ping. For the integration tests, which
+/// need to tell an answered hop from a dead one without duplicating the parsing rules — a test
+/// with its own parser could agree with a broken app parser and still pass. It goes through
+/// `probe_once`, so the reference answer comes from the very code path a live probe takes.
+pub fn probe_blocking(host: &str, timeout_ms: u32) -> Result<f32, ProbeFail> {
+    probe_once(&ProbeJob {
+        id: 0,
+        host: host.into(),
+        timeout_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +535,34 @@ mod tests {
             Some(1.53)
         );
         assert_eq!(parse_rtt("Request timed out.", &["time="]), None);
+    }
+
+    /// `ping.exe` writes the reply time as `Zeit<1ms` on a fast hop (loopback, LAN gateway).
+    /// The `<` is not a digit, so the plain scan used to stop before any number and the probe
+    /// was filed as a timeout — which is why every local target showed a dead line.
+    #[test]
+    fn parses_sub_millisecond_times() {
+        // A reply under a millisecond has no digits of its own; report it as 0.5 ms, i.e.
+        // "faster than one", rather than pretending the host never answered.
+        assert_eq!(
+            parse_rtt("Antwort von 127.0.0.1: Zeit<1ms TTL=128", &["Zeit="]),
+            Some(0.5)
+        );
+        assert_eq!(parse_rtt("Reply from ::1: time<1ms", &["time="]), Some(0.5));
+        // A real number still wins, and the summary block at the end ("Minimum = 1ms,
+        // Maximum = 1ms") carries no `Zeit`, so a reply line is always what gets read.
+        assert_eq!(
+            parse_rtt("Reply from 8.8.8.8: Zeit=14ms TTL=111", &["Zeit="]),
+            Some(14.0)
+        );
+        assert_eq!(
+            parse_rtt(
+                "Antwort von 192.168.178.1: Bytes=32 Zeit=1ms TTL=64\n\
+                 Ca. Zeitangaben in Millisek.:\n    Minimum = 1ms, Maximum = 1ms",
+                &["Zeit="]
+            ),
+            Some(1.0)
+        );
     }
 
     #[test]

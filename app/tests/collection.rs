@@ -279,8 +279,11 @@ fn app_tick_collects_data_into_its_charts() {
     );
     assert!(with_data > 0, "no target produced a single sample");
 
-    // 2) The numbers are plausible, not placeholders.
+    // 2) The numbers are plausible, not placeholders. And on a machine where the reference
+    // probe answers, the trace must hold real reply times — not a row of timeouts that merely
+    // counts as "data" (see step 3 for why that mattered).
     let mut logged = 0usize;
+    let mut replies = 0usize;
     for t in &app.targets {
         for s in t.series.samples() {
             assert!(s.t_secs >= 0.0);
@@ -290,29 +293,43 @@ fn app_tick_collects_data_into_its_charts() {
             } else {
                 assert!(system_ping::history::is_ok(s.rtt_ms));
                 assert!(s.rtt_ms < 60_000.0, "implausible rtt {}", s.rtt_ms);
+                replies += 1;
             }
             logged += 1;
         }
     }
     assert_eq!(logged, fresh);
-
-    // 3) The event log. Loopback answered, so the app's one outage line ("loopback antwortet
-    // nicht (Ping-Fehler).") is what a failed probe writes — proof that results reach both the
-    // charts and the log. Which of the two happens depends on this machine's ICMP permissions,
-    // so the pass asserts on the text rather than a count, and never on connectivity.
-    let texts: Vec<&str> = app.log.iter().map(|e| e.text.as_str()).collect();
-    assert!(!texts.is_empty(), "the app logged nothing at all");
-    let healthy = with_data > 0;
-    if healthy {
+    #[cfg(windows)]
+    if system_ping::ping::probe_blocking("127.0.0.1", 2000).is_ok() {
         assert!(
-            !texts
-                .iter()
-                .any(|t| t.contains("Timeout") || t.contains("nicht erreichbar")),
-            "a target that answered was reported as a failure: {texts:?}",
+            replies > 0,
+            "loopback answered, yet every sample is a timeout"
+        );
+    }
+
+    // 3) The event log, and what it says about the trace. Whether loopback answers depends on
+    // this machine's ICMP permissions (it does here, but a locked-down host is possible), so the
+    // pass reads the truth from `ping.exe` itself and then requires the app to agree with it:
+    // an answered hop must never leave a failure line, a dead one must be reported after two
+    // missed probes in a row. That is the assertion which used to hide the real bug — every
+    // local reply printed `Zeit<1ms`, the parser stopped at the `<` and called it a timeout, so
+    // the charts filled up with failures and the log matched them.
+    let texts: Vec<&str> = app.log.iter().map(|e| e.text.as_str()).collect();
+    let failures: Vec<&&str> = texts
+        .iter()
+        .filter(|t| t.contains("Timeout") || t.contains("nicht erreichbar"))
+        .collect();
+    // Only a machine where the reference probe answers can prove the app agrees with it;
+    // elsewhere ICMP itself is broken and there is nothing to compare against.
+    #[cfg(windows)]
+    if system_ping::ping::probe_blocking("127.0.0.1", 2000).is_ok() {
+        assert!(
+            failures.is_empty(),
+            "ping.exe answers 127.0.0.1, so the app must not report it as dead: {texts:?}"
         );
     } else {
         assert!(
-            texts.iter().any(|t| t.contains("loopback")),
+            !failures.is_empty() && texts.iter().any(|t| t.contains("loopback")),
             "a target that never answered left no trace in the log: {texts:?}",
         );
     }
@@ -488,4 +505,57 @@ fn collection_needs_no_gui_types() {
     assert!(!takes_no_egui(&job).is_null());
     let p: &Path = Path::new(".");
     assert!(p.exists());
+}
+
+/// The window's frame loop is what feeds the charts: `App::frame` ticks the engine and then
+/// paints. This drives that same entry point for a few seconds of real time and checks the
+/// series behind the plot actually fills up — a `update()` that only painted would keep the
+/// chart empty forever, which is the bug this test exists to catch.
+#[test]
+fn window_frames_fill_the_charts() {
+    let _dir = StateDir::new("frames");
+    let mut app = system_ping::app::App::new(system_ping::app::AppOptions::default(), Vec::new());
+    app.options.interval_secs = 1.0;
+    app.targets.clear();
+    app.add_named_target("127.0.0.1", "loopback");
+
+    // A real egui context, the same type eframe hands to `update`. Nothing is shown, so no
+    // window appears; `run` just lays out and paints the panels into a shape list.
+    let ctx = egui::Context::default();
+    app.start();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    let mut frames = 0usize;
+    while std::time::Instant::now() < deadline {
+        // One frame, painted inside a real egui pass — the same shape `update` has.
+        let out = ctx.run(egui::RawInput::default(), |c| app.frame(c));
+        frames += 1;
+        assert!(
+            !out.shapes.is_empty(),
+            "frame {frames} painted nothing at all"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    app.stop();
+
+    let samples: usize = app.targets.iter().map(|t| t.series.len()).sum();
+    assert!(
+        samples >= 3,
+        "{frames} frames of the live loop produced only {samples} samples"
+    );
+    // The trace has to be plottable: real stamps, increasing, and inside the window the
+    // chart actually draws (its x axis runs from `now - horizon` to `now`).
+    let t = &app.targets[0];
+    let now = app.now_secs();
+    let horizon = app.options.horizon_secs as f64;
+    let mut prev = f64::MIN;
+    for s in t.series.samples() {
+        assert!(s.t_secs > prev, "x axis must increase: {s:?}");
+        prev = s.t_secs;
+        assert!(s.at_ms > 0, "a live sample has no absolute time: {s:?}");
+        assert!(
+            s.t_secs > now - horizon - 1.0 && s.t_secs <= now + 1.0,
+            "sample at {} falls outside the drawn window (now {now})",
+            s.t_secs
+        );
+    }
 }
