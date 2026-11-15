@@ -57,32 +57,21 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !app.running {
-                        if ui
-                            .button(RichText::new("Ziel entfernen").color(m.danger_text()))
-                            .on_hover_text("Entfernt das in der Liste markierte Ziel")
-                            .clicked()
-                        {
-                            app.close_edit();
-                            app.remove_selected();
-                        }
-                        if ui
-                            .button(RichText::new(
-                                // `autostart_state()` is the registry's answer (looked up at
-                                // startup, then kept current); the raw counter alone would be
-                                // „aus“ until the user happens to press this button.
-                                if app.autostart_state() == Some(true) {
-                                    "Autostart: an"
-                                } else {
-                                    "Autostart: aus"
-                                },
-                            ))
+                    // Der Autostart-Knopf ist nur sichtbar, solange nicht gemessen wird.
+                    // `autostart_state()` is the registry's answer (looked up at startup, then kept
+                    // current); the raw counter alone would be „aus“ until the user presses this.
+                    if !app.running
+                        && ui
+                            .button(if app.autostart_state() == Some(true) {
+                                "Autostart: an"
+                            } else {
+                                "Autostart: aus"
+                            })
                             .on_hover_text("Beim Anmelden von Windows starten")
                             .clicked()
-                        {
-                            let on = app.autostart_state() != Some(true);
-                            app.set_autostart(on);
-                        }
+                    {
+                        let on = app.autostart_state() != Some(true);
+                        app.set_autostart(on);
                     }
                     if ui
                         .button(if app.running {
@@ -148,9 +137,7 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
         .show(ctx, |ui| left_body(ui, app));
 }
 
-/// Which of the rows built by [`left_body`] a plain left click belongs to, if any. That function
-/// is defined further down.
-/// Which of the rows built by `left_body()` a plain left click belongs to, if any.
+/// Which of the rows built by [`left_body`] a plain left click belongs to, if any.
 ///
 /// A target row cannot use the ordinary `response.clicked()`: egui's `Frame::show` registers its
 /// area with `Sense::hover()` only (see `tests/frame_click.rs`), so a row never reports a click of
@@ -210,6 +197,9 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             // Collect actions first to avoid borrow conflicts.
             let mut edit_action: Option<fn(&mut App)> = None;
             let mut begin_edit_idx: Option<usize> = None;
+            // Set by the „entfernen“ button inside an open editor: which target to delete once the
+            // list is no longer borrowed.
+            let mut remove_idx: Option<usize> = None;
             // Filled with every row's click area while the rows are built, then handed to
             // `app.row_rects` below. A test needs those rects to aim a synthetic click.
             let mut row_rects = Vec::new();
@@ -260,6 +250,16 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                                 ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                             let dot_rect = dot_rect.shrink(1.5);
                             ui.painter().rect_filled(dot_rect, 5.5, color);
+                            // Das Ziel loswerden, an dem man gerade arbeitet: ersetzt den Knopf
+                            // „Ziel entfernen“ oben rechts, der das markierte Ziel traf und damit
+                            // leicht das falsche erwischte.
+                            if ui
+                                .small_button(RichText::new("entfernen").color(m.danger_text()))
+                                .on_hover_text(format!("{} entfernen", t.label))
+                                .clicked()
+                            {
+                                remove_idx = Some(idx);
+                            }
                             ui.label(RichText::new("Bearbeiten").strong().size(12.0));
 
                             ui.with_layout(
@@ -427,6 +427,12 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             }
             if let Some(action) = edit_action {
                 action(app);
+            }
+            // Removing a target closes the editor first: it points at an index that disappears.
+            if let Some(idx) = remove_idx {
+                app.cancel_edit();
+                app.selected = idx;
+                app.remove_selected();
             }
             app.row_rects = row_rects;
             app.row_heights = row_heights;

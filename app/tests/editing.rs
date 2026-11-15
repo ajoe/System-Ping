@@ -207,3 +207,41 @@ fn the_list_cannot_change_while_editing() {
     app.add_target();
     assert_eq!(app.targets.len(), 3);
 }
+
+/// Das Entfernen sitzt jetzt im Editor des offenenen Ziels und nicht mehr oben rechts, wo es das
+/// zuletzt markierte Ziel traf. Der Knopf selbst ist UI; hier wird derselbe Weg geprüft, den die
+/// Kopfzeile des Editors geht: Editor schliessen, Index setzen, entfernen.
+#[test]
+fn removing_from_the_editor_targets_that_very_target() {
+    let mut app = app_with(vec![("A", "127.0.0.1"), ("B", "127.0.0.1")]);
+
+    // Oben rechts war das markierte Ziel gemeint - hier absichtlich ein anderes.
+    app.selected = 0;
+    // Der Weg des Editor-Knopfes: er zeigt auf die Zeile, die gerade offen ist.
+    app.begin_edit(1);
+    app.cancel_edit();
+    app.selected = 1;
+    app.remove_selected();
+
+    assert_eq!(app.targets.len(), 1);
+    assert_eq!(app.targets[0].label, "A", "B ist weg, A bleibt");
+}
+
+/// Der Editor-Knopf entfernt auch dann das richtige Ziel, wenn die Liste vorher offen war: der
+/// Editor wird zuerst geschlossen, damit kein Index ins Leere zeigt.
+#[test]
+fn the_editor_closes_before_its_target_is_removed() {
+    let mut app = app_with(vec![("A", "127.0.0.1"), ("B", "127.0.0.1")]);
+    app.begin_edit(1);
+
+    // Genau die Reihenfolge, die `ui::left_body` nach der Zeilenschleife ausführt.
+    app.cancel_edit();
+    app.selected = 1;
+    app.remove_selected();
+
+    assert_eq!(
+        app.edit_idx, None,
+        "kein Editor zeigt mehr auf eine entfernte Zeile"
+    );
+    assert_eq!(app.targets.len(), 1);
+}

@@ -40,6 +40,8 @@ oder „✓ Speichern“ übernimmt, Escape oder „✗ Abbrechen“ verwirft. D
 die Details des Ziels (Messwerte, ø, min/max, Verluste im sichtbaren Zeitfenster). Ein zweiter
 Klick auf dasselbe Ziel lässt den Editor samt Eingabe stehen; schließen tun nur Abbrechen,
 Escape, Speichern oder ein Klick auf eine andere Zeile — dabei wird vorher gespeichert.
+**Entfernen** gibt es im Editor links oben („entfernen“), also am Ziel, an dem man gerade
+arbeitet — nicht mehr oben rechts am markierten Eintrag.
 
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der
