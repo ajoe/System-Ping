@@ -143,7 +143,14 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
                 .fill(ctx.style().visuals.panel_fill)
                 .inner_margin(egui::Margin::same(8)),
         )
-        .show(ctx, |ui| left_body(ui, app));
+        .show(ctx, |ui| {
+            left_body(ui, app);
+            // A colour chosen in the editor is a per-target setting, so it is not covered by the
+            // autosave that watches `AppOptions`. It still has to survive a restart.
+            if std::mem::take(&mut app.color_dirty) {
+                app.save_now();
+            }
+        });
 }
 
 /// Which of the rows built by [`left_body`] a plain left click belongs to, if any.
@@ -209,13 +216,22 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             // Set by the „entfernen“ button inside an open editor: which target to delete once the
             // list is no longer borrowed.
             let mut remove_idx: Option<usize> = None;
+            // A colour change has to be written back to disk right away, like every other setting.
+            let mut color_changed = false;
             // Filled with every row's click area while the rows are built, then handed to
             // `app.row_rects` below. A test needs those rects to aim a synthetic click.
             let mut row_rects = Vec::new();
             let mut row_heights = Vec::new();
 
-            for (idx, t) in app.targets.iter().enumerate() {
+            for idx in 0..app.targets.len() {
+                // Everything the row and the editor need from this target is read out here, so the
+                // rest of the body never has to borrow `app.targets` again. The editor below needs
+                // `app` mutably (its fields are the form's state), which a live borrow would forbid.
+                let t = &app.targets[idx];
                 let color = app.status_color(t);
+                // The line colour of this target, shown next to the status dot so the row already
+                // says which trace in the chart belongs to it.
+                let trace = app.trace_color(t);
                 let txt = app.status_text(t);
                 let sel = app.selected == idx;
                 let editing_here = app.edit_idx == Some(idx);
@@ -224,6 +240,16 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                 } else {
                     -1.0
                 };
+                let label = t.label.clone();
+                let host = t.host.clone();
+                let kind_label = t.kind.label().to_string();
+                let enabled = t.enabled;
+                let auto_idx = app.color_idx_of(t);
+                // Details for this one target: how much history is kept, and what it says about
+                // the current window.
+                let horizon = app.options.horizon_secs as f64;
+                let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
+                let st = t.series.stats_window(from, f64::MAX, &mut scratch);
 
                 // While a row is being edited, show its settings instead of the label. The editor
                 // is deliberately *not* one of `row_rects`: it is a form with real controls, and a
@@ -240,12 +266,6 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                     );
                     row_rects.push(rect);
 
-                    // Details for this one target: how much history is kept, and what it
-                    // says about the current window.
-                    let horizon = app.options.horizon_secs as f64;
-                    let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
-                    let st = t.series.stats_window(from, f64::MAX, &mut scratch);
-
                     // The panel is only 250 px wide, so the editor has to stay tight.
                     ui.style_mut().spacing.item_spacing.y = 3.0;
 
@@ -259,12 +279,17 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                                 ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                             let dot_rect = dot_rect.shrink(1.5);
                             ui.painter().rect_filled(dot_rect, 5.5, color);
+                            // Der Farbstrich: dieselbe Farbe wie die Linie im Diagramm, damit schon
+                            // die Liste sagt, welche Kurve zu welchem Ziel gehört.
+                            let (line_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
+                            ui.painter().rect_filled(line_rect.shrink(4.0), 1.5, trace);
                             // Das Ziel loswerden, an dem man gerade arbeitet: ersetzt den Knopf
                             // „Ziel entfernen“ oben rechts, der das markierte Ziel traf und damit
                             // leicht das falsche erwischte.
                             if ui
                                 .small_button(RichText::new("entfernen").color(m.danger_text()))
-                                .on_hover_text(format!("{} entfernen", t.label))
+                                .on_hover_text(format!("{label} entfernen"))
                                 .clicked()
                             {
                                 remove_idx = Some(idx);
@@ -317,6 +342,53 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             });
                         });
 
+                        // Farbe der Linie. Ohne Wahl gibt sie die Palette nach der Position in der
+                        // Liste her; wer hier etwas anfasst, bekommt eine feste Zahl, die auch nach
+                        // einem Neustart und beim Umsortieren dieselbe Farbe ergibt. Der Knopf ist
+                        // gleichzeitig die Vorschau: er zeigt genau den Ton, den das Diagramm malt.
+                        let picked = app.edit_color_idx != app::AUTO_COLOR;
+                        let shown_idx = if picked { app.edit_color_idx } else { auto_idx };
+                        let swatch_name = if picked {
+                            theme::swatch(app.edit_color_idx).name
+                        } else {
+                            "Auto"
+                        };
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("edit_color")
+                                .width(96.0)
+                                .selected_text(RichText::new(swatch_name).size(12.0))
+                                .show_ui(ui, |ui| {
+                                    for (n, s) in theme::PALETTE.iter().enumerate() {
+                                        if ui
+                                            .selectable_value(
+                                                &mut app.edit_color_idx,
+                                                n,
+                                                RichText::new(s.name).size(12.0),
+                                            )
+                                            .changed()
+                                        {
+                                            color_changed = true;
+                                        }
+                                    }
+                                });
+                            ui.painter().rect_filled(
+                                ui.available_rect_before_wrap().shrink(4.0),
+                                2.0,
+                                m.swatch(shown_idx),
+                            );
+                            ui.allocate_at_least(Vec2::new(18.0, 16.0), egui::Sense::hover());
+                            if ui
+                                .small_button("Auto")
+                                .on_hover_text(
+                                    "Farbe wieder automatisch nach der Position in der Liste",
+                                )
+                                .clicked()
+                            {
+                                app.edit_color_idx = app::AUTO_COLOR;
+                                color_changed = true;
+                            }
+                        });
+
                         // Details: what the stored history says about this target.
                         let avg = if st.replies > 0 {
                             format!("ø {} ms", crate::app::fmt_ms(st.avg as f32))
@@ -335,8 +407,8 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                         ui.label(
                             RichText::new(format!(
                                 "{} · {}",
-                                t.kind.label(),
-                                if t.enabled { "aktiv" } else { "pausiert" }
+                                kind_label,
+                                if enabled { "aktiv" } else { "pausiert" }
                             ))
                             .weak()
                             .size(11.0),
@@ -389,11 +461,16 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                         let dot_rect = dot_rect.shrink(1.5);
                         ui.painter().rect_filled(dot_rect, 5.5, color);
+                        // Strich in Linienfarbe: wer die Liste liest, sieht sofort, welche Kurve im
+                        // Diagramm zu diesem Ziel gehört.
+                        let (line_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
+                        ui.painter().rect_filled(line_rect.shrink(4.0), 1.5, trace);
 
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.add(
-                                Label::new(RichText::new(&t.label).strong().size(13.0))
+                                Label::new(RichText::new(label).strong().size(13.0))
                                     .selectable(false),
                             );
                             let age = if secs_ago < 0.0 {
@@ -403,9 +480,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             };
                             ui.add(
                                 Label::new(
-                                    RichText::new(format!("{} · {}", t.host, age))
-                                        .weak()
-                                        .size(11.0),
+                                    RichText::new(format!("{host} · {age}")).weak().size(11.0),
                                 )
                                 .selectable(false),
                             );
@@ -442,6 +517,11 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                 app.cancel_edit();
                 app.selected = idx;
                 app.remove_selected();
+            }
+            // The colour lives on the target, not in `AppOptions`, so `commit_edit` cannot hand it
+            // to the autosave. Flagging it here lets `left` write the state once the panel is done.
+            if color_changed {
+                app.color_dirty = true;
             }
             app.row_rects = row_rects;
             app.row_heights = row_heights;
@@ -567,17 +647,9 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             app.jump_to_prev_outlier();
         }
         for t in &app.targets {
-            let c = app.status_color(t);
-            let sel = app.targets.get(app.selected).map(|x| x.id) == Some(t.id);
+            let c = app.trace_color(t);
             if ui
-                .add(
-                    Label::new(
-                        RichText::new(&t.label)
-                            .color(if sel { Color32::WHITE } else { c })
-                            .strong(),
-                    )
-                    .selectable(false),
-                )
+                .add(Label::new(RichText::new(&t.label).color(c).strong()).selectable(false))
                 .on_hover_text(format!("{} · {}", t.host, app.status_text(t)))
                 .clicked()
             {
@@ -722,10 +794,13 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         // until the first probe finishes. The legend dot says whether a trace is live or
         // paused; the line itself stays drawn either way.
         let sel = app.targets.get(app.selected).map(|x| x.id) == Some(t.id);
-        // A line has to be visible before the first reply arrives, so its colour comes from
-        // the latency band of the sample being drawn, not from `last_rtt` (which is still
-        // "waiting" while a target is cold). The selected trace gets a contrasting outline
-        // so it stays readable whichever band it falls in.
+        // Every target keeps one colour for its whole line. Colouring each segment by its latency
+        // band was unreadable as soon as several targets shared the plot: two traces in the same
+        // band were indistinguishable, and one trace changed colour mid-line. The band is still
+        // visible on the y axis and in the status dot; what the line has to say is "which target".
+        // A selected trace gets a thin outline in the text colour so it also stands out where two
+        // lines of the same family overlap.
+        let line = app.trace_color(t);
         let width = if sel { 2.0_f32 } else { 1.5_f32 };
         // Outliers get a ring on the time axis, at the same cut the statistics use.
         let (cut, _n) = history::outlier_cut(t.series.samples());
@@ -754,11 +829,10 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             }
             let y = map_y(s.rtt_ms.min(scale_top), scale_top, rect);
             if let Some((px, py)) = prev {
-                // Band colour per segment; a selected trace gets a thin outline in the
-                // text colour so a green-on-green or grey-on-grey stretch stays visible.
+                // One colour per target: the line says which trace belongs to which row.
                 ui.painter().line_segment(
                     [egui::pos2(px, py), egui::pos2(x, y)],
-                    Stroke::new(width, m.rtt_band(s.rtt_ms)),
+                    Stroke::new(width, line),
                 );
             }
             if (s.rtt_ms as f64) > cut {
@@ -777,17 +851,14 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         }
 
         // Latest value marker: it marks the last measurement even after a stop, so that
-        // "when did this target go quiet" stays readable. It takes the band colour of the
-        // sample it marks, like the line itself.
+        // "when did this target go quiet" stays readable. It takes the target's line colour,
+        // like the trace itself.
         if let Some(s) = t.series.samples().last() {
             if s.t_secs >= t_min && s.t_secs < t_max && history::is_ok(s.rtt_ms) {
                 let x = map_x(s.t_secs, t_min, t_max, rect);
                 let y = map_y(s.rtt_ms.min(scale_top), scale_top, rect);
-                ui.painter().circle_filled(
-                    egui::pos2(x, y),
-                    if sel { 3.4 } else { 2.4 },
-                    m.rtt_band(s.rtt_ms),
-                );
+                ui.painter()
+                    .circle_filled(egui::pos2(x, y), if sel { 3.4 } else { 2.4 }, line);
             }
         }
     }
@@ -801,28 +872,45 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                 Stroke::new(1.0_f32, m.hover_line()),
             );
             let t_at = map_t(p.x, t_min, t_max, rect);
-            let mut lines = vec![format!("{} s", t_at.round() as i64)];
+            // One line per target, and each label is painted in the target's own colour so the
+            // readout can be matched to the traces without guessing.
+            let head = format!("{} s", t_at.round() as i64);
+            let mut rows: Vec<(String, Color32)> = Vec::new();
             for t in &app.targets {
                 if !is_shown(app, t) {
                     continue;
                 }
                 if let Some(s) = nearest(t, t_at) {
                     let outlier = (s.rtt_ms as f64) > history::outlier_cut(t.series.samples()).0;
-                    lines.push(format!(
-                        "{}  {}{}",
-                        t.label,
-                        if history::is_ok(s.rtt_ms) {
-                            format!("{:.1} ms", s.rtt_ms)
-                        } else {
-                            "Timeout".into()
-                        },
-                        if outlier { "  <- Ausr." } else { "" }
+                    rows.push((
+                        format!(
+                            "{}  {}{}",
+                            t.label,
+                            if history::is_ok(s.rtt_ms) {
+                                format!("{:.1} ms", s.rtt_ms)
+                            } else {
+                                "Timeout".into()
+                            },
+                            if outlier { "  <- Ausr." } else { "" }
+                        ),
+                        app.trace_color(t),
                     ));
                 }
             }
-            let gal =
-                ui.painter()
-                    .layout_no_wrap(lines.join("\n"), FontId::monospace(11.0), m.text());
+            let mut layout_job = egui::text::LayoutJob::default();
+            layout_job.append(
+                &head,
+                0.0,
+                egui::text::TextFormat::simple(FontId::monospace(11.0), m.text()),
+            );
+            for (line, color) in &rows {
+                layout_job.append(
+                    &format!("\n{line}"),
+                    0.0,
+                    egui::text::TextFormat::simple(FontId::monospace(11.0), *color),
+                );
+            }
+            let gal = ui.painter().layout_job(layout_job);
             let pos = egui::pos2(
                 (p.x + 10.0).min(rect.right() - gal.size().x - 6.0),
                 rect.top() + 6.0,
@@ -961,6 +1049,7 @@ fn events_view(ui: &mut Ui, app: &mut App) {
         .show(ui, |ui| {
             for idx in 0..app.targets.len() {
                 let color = app.status_color(&app.targets[idx]);
+                let trace = app.trace_color(&app.targets[idx]);
                 let txt = app.status_text(&app.targets[idx]);
                 let st = app.targets[idx].series.stats_window(
                     app.targets[idx]
@@ -987,6 +1076,10 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 6.0, color);
+                        // Strich in Linienfarbe, wie in der Zielliste links.
+                        let (line_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(18.0, 14.0), egui::Sense::hover());
+                        ui.painter().rect_filled(line_rect.shrink(5.0), 2.0, trace);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             ui.add(
@@ -1024,7 +1117,7 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                     ui.add_space(4.0);
                     let w = ui.available_width();
                     let (bar, _) = ui.allocate_exact_size(Vec2::new(w, 16.0), egui::Sense::hover());
-                    draw_sparkline(ui, &t.series, bar, color);
+                    draw_sparkline(ui, &t.series, bar, trace);
                     ui.add(
                         Label::new(
                             RichText::new(format!(
@@ -1143,11 +1236,16 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
                     &mut scratch,
                 );
                 let color = app.status_color(t);
+                let trace = app.trace_color(t);
                 let txt = app.status_text(t);
                 let sel = app.selected == idx;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     let widths = column_widths();
+                    // Farbstrich vor dem Namen: dieselbe Farbe wie die Linie im Diagramm.
+                    let (line_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(14.0, 20.0), egui::Sense::hover());
+                    ui.painter().rect_filled(line_rect.shrink(6.0), 1.5, trace);
                     if ui
                         .add_sized(
                             [widths[0], 20.0],

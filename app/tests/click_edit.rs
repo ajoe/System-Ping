@@ -167,8 +167,22 @@ fn ein_klick_auf_die_offene_zeile_laesst_den_editor_stehen() {
     assert_eq!(app.edit_label, "entwurf", "die Eingabe bleibt erhalten");
     assert_eq!(app.targets[0].label, "Gateway", "nichts ist gespeichert");
 
-    // Ein Klick ausserhalb der Liste (unter den Zeilen) tut dasselbe: nichts.
-    let daneben = Pos2::new(125.0, 400.0);
+    // Ein Klick ausserhalb der Liste tut dasselbe: nichts. Der Punkt liegt rechts neben der Liste
+    // und damit in jedem Fall ausserhalb aller Zeilen - frueher reichte dafuer ein fester Punkt unter
+    // den Zeilen, aber der Editor ist hoeher als eine normale Zeile und kann ihn inzwischen decken.
+    let unten_links = app
+        .row_rects
+        .iter()
+        .map(|r| r.bottom())
+        .fold(f32::NEG_INFINITY, f32::max);
+    let daneben = Pos2::new(
+        app.row_rects
+            .iter()
+            .map(|r| r.right())
+            .fold(0.0_f32, f32::max)
+            + 40.0,
+        unten_links + 60.0,
+    );
     klick_auf(&ctx, &mut app, daneben, 3.0);
     assert_eq!(
         app.edit_idx,

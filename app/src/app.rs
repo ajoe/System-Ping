@@ -4,6 +4,7 @@ use crate::exporter;
 use crate::history::{self, is_ok, Fail, Sample, Series, Stats};
 use crate::ping::{ProbeJob, ProbeResult};
 use crate::store;
+use crate::theme;
 use egui::Color32;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -46,6 +47,9 @@ impl TargetKind {
     }
 }
 
+/// Marker for "this target's colour comes from the palette, picked by its position in the list".
+pub const AUTO_COLOR: usize = usize::MAX;
+
 /// One monitored address.
 pub struct Target {
     pub id: usize,
@@ -53,6 +57,10 @@ pub struct Target {
     pub host: String,
     pub kind: TargetKind,
     pub enabled: bool,
+    /// Index into [`crate::theme::PALETTE`]. `usize::MAX` means "whatever the palette gives me",
+    /// i.e. a colour picked automatically from the position in the list. A manual choice stores
+    /// the number and therefore survives both a restart and a reordering of the list.
+    pub color_idx: usize,
     pub series: Series,
     /// Seconds since start of the last completed probe (NaN = never).
     pub last_probe_secs: f64,
@@ -70,6 +78,7 @@ impl Target {
             host: host.into(),
             kind,
             enabled: true,
+            color_idx: AUTO_COLOR,
             // The real capacity comes from the app's settings (`sync_caps`), which this
             // constructor cannot see. It only has to be big enough for a target that is added
             // and measured before the first sync, so it uses the same floor the settings use.
@@ -284,6 +293,11 @@ pub struct App {
     pub edit_kind: TargetKind,
     /// Whether this target is measured. Turning it off pauses probing without deleting history.
     pub edit_enabled: bool,
+    /// Colour picked in the editor; [`AUTO_COLOR`] keeps the automatic choice.
+    pub edit_color_idx: usize,
+    /// Set when the colour picker changed something. The panel that owns the editor saves the
+    /// state and clears it, because a colour is stored per target and not in `AppOptions`.
+    pub color_dirty: bool,
 
     // Chart interaction
     pub hover_x: Option<f64>,
@@ -586,6 +600,8 @@ impl App {
             edit_label: String::new(),
             edit_kind: TargetKind::Custom,
             edit_enabled: true,
+            edit_color_idx: AUTO_COLOR,
+            color_dirty: false,
             hover_x: None,
             follow_live: true,
             pan_offset_secs: 0.0,
@@ -631,6 +647,7 @@ impl App {
                 let id = next_id;
                 let mut tgt = Target::new(id, t.label, t.host, t.kind);
                 tgt.enabled = t.enabled;
+                tgt.color_idx = t.color_idx;
                 for (at_ms, rtt) in &t.samples {
                     // `t_secs` is filled by `reanchor` below: the stored seconds belong to a
                     // session that has already ended.
@@ -1054,6 +1071,7 @@ impl App {
             self.edit_label = t.label.clone();
             self.edit_kind = t.kind;
             self.edit_enabled = t.enabled;
+            self.edit_color_idx = t.color_idx;
         }
     }
 
@@ -1105,6 +1123,12 @@ impl App {
         // a user relabel a device that `classify` cannot recognise.
         if !host_changed && self.edit_kind != t.kind {
             t.kind = self.edit_kind;
+        }
+
+        // Same idea for the colour: automatic by default, but what the picker chooses is stored
+        // as a fixed palette number so it no longer moves when targets are added or removed.
+        if self.edit_color_idx != t.color_idx {
+            t.color_idx = self.edit_color_idx;
         }
 
         // Pausing stops the running probe and drops the schedule entry; enabling puts the target
@@ -1281,6 +1305,7 @@ impl App {
                 host: t.host.clone(),
                 kind: t.kind,
                 enabled: t.enabled,
+                color_idx: t.color_idx,
                 samples: t
                     .series
                     .samples()
@@ -1325,13 +1350,49 @@ impl App {
             .status_dot(!t.enabled, self.running, t.last_rtt)
     }
 
-    /// Colour of one target's trace. Unused by the chart, which colours each sample by its own
-    /// latency band — a whole-line colour must not depend on `last_rtt`, because that value
-    /// only refreshes when a probe comes back, so the first samples would be drawn in the
-    /// "waiting" grey and stay invisible against the plot background until the first reply
-    /// arrives. Kept for callers that want one representative colour per target.
+    /// Colour of one target's line, dot and legend entry. Every target gets its own colour so
+    /// several traces on the same grid stay separable; see [`App::color_idx_of`] for how that
+    /// colour is chosen. The status dot deliberately does *not* use it: there the latency band is
+    /// what has to be visible at a glance, and `status_dot` already encodes paused/waiting/loss.
     pub fn trace_color(&self, t: &Target) -> Color32 {
-        self.status_color(t)
+        self.theme_mode.swatch(self.color_idx_of(t))
+    }
+
+    /// Palette number this target uses: the stored one if the user picked a colour, otherwise the
+    /// first free colour of the palette. The automatic pick counts only the targets that were
+    /// given a colour before it (in list order), so two targets never end up with the same line
+    /// while there is still an unused colour — and a target whose colour was chosen by hand frees
+    /// its slot for the others.
+    pub fn color_idx_of(&self, t: &Target) -> usize {
+        if t.color_idx != AUTO_COLOR {
+            return t.color_idx % theme::PALETTE_LEN;
+        }
+        self.first_auto_idx(t)
+    }
+
+    /// The palette number an automatic target gets: the first slot no other target occupies. Only
+    /// targets ahead of this one in the list count as occupants, so every target can be answered
+    /// without knowing what comes after it. When the list is longer than the palette, colours are
+    /// reused by position instead of leaving a target without a line colour.
+    fn first_auto_idx(&self, t: &Target) -> usize {
+        let mut used = [false; theme::PALETTE_LEN];
+        for other in self.targets.iter().take_while(|o| o.id != t.id) {
+            let idx = if other.color_idx != AUTO_COLOR {
+                other.color_idx % theme::PALETTE_LEN
+            } else {
+                match self.first_auto_idx(other) {
+                    // An earlier target that already had to reuse the palette must not block this
+                    // one; otherwise a long list would run out of colours too early.
+                    theme::PALETTE_LEN..=usize::MAX => continue,
+                    n => n,
+                }
+            };
+            used[idx] = true;
+        }
+        match used.iter().position(|free| !*free) {
+            Some(n) => n,
+            None => self.targets.iter().take_while(|o| o.id != t.id).count() % theme::PALETTE_LEN,
+        }
     }
 
     pub fn status_text(&self, t: &Target) -> String {

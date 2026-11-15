@@ -37,9 +37,19 @@ pub struct SavedTarget {
     pub host: String,
     pub kind: TargetKind,
     pub enabled: bool,
+    /// Palette number chosen by hand, or [`crate::app::AUTO_COLOR`] for an automatic colour.
+    /// Missing in older files -> automatic.
+    #[serde(default = "auto_color")]
+    pub color_idx: usize,
     /// Absolute wall-clock time of the sample as Unix milliseconds, paired with the rtt. This
     /// is what makes an export after a restart read correctly.
     pub samples: Vec<(i64, f32)>,
+}
+
+/// The persisted marker for "colour picked automatically". A function rather than a path so serde
+/// can use it as a field default.
+fn auto_color() -> usize {
+    crate::app::AUTO_COLOR
 }
 
 impl Clone for SavedTarget {
@@ -50,6 +60,7 @@ impl Clone for SavedTarget {
             host: self.host.clone(),
             kind: self.kind,
             enabled: self.enabled,
+            color_idx: self.color_idx,
             samples: self.samples.clone(),
         }
     }
@@ -149,6 +160,7 @@ impl SavedTarget {
             host: v.host,
             kind: v.kind,
             enabled: v.enabled,
+            color_idx: crate::app::AUTO_COLOR,
             samples: v
                 .samples
                 .into_iter()

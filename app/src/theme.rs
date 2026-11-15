@@ -10,6 +10,78 @@ pub const GOOD: Color32 = Color32::from_rgb(58, 163, 120);
 pub const OFFLINE: Color32 = Color32::from_rgb(120, 128, 142);
 pub const ORANGE: Color32 = Color32::from_rgb(236, 130, 56);
 
+/// One entry of the automatic trace palette: a name to show in the picker and the two shades.
+pub struct Swatch {
+    pub name: &'static str,
+    light: [u8; 3],
+    dark: [u8; 3],
+}
+
+/// The colours a new target is given automatically, in order. They are picked so several traces
+/// stay distinguishable even though the chart paints every line at 1.5 px on the same grid.
+pub const PALETTE: &[Swatch] = &[
+    Swatch {
+        name: "Blau",
+        light: [30, 105, 190],
+        dark: [86, 160, 235],
+    },
+    Swatch {
+        name: "Grün",
+        light: [24, 122, 76],
+        dark: [70, 190, 110],
+    },
+    Swatch {
+        name: "Violett",
+        light: [128, 74, 186],
+        dark: [172, 132, 235],
+    },
+    Swatch {
+        name: "Türkis",
+        light: [18, 122, 132],
+        dark: [70, 190, 200],
+    },
+    Swatch {
+        name: "Beere",
+        light: [176, 54, 122],
+        dark: [235, 118, 172],
+    },
+    Swatch {
+        name: "Sand",
+        light: [140, 112, 24],
+        dark: [214, 186, 96],
+    },
+    Swatch {
+        name: "Zinnober",
+        light: [186, 62, 44],
+        dark: [230, 104, 88],
+    },
+    Swatch {
+        name: "Schiefer",
+        light: [74, 92, 116],
+        dark: [144, 162, 188],
+    },
+];
+
+/// How many automatic colours there are. The picker uses it to decide when to offer „Auto“.
+pub const PALETTE_LEN: usize = PALETTE.len();
+
+/// Colour number `n` of the palette. A target stores this number instead of a colour, so the same
+/// target keeps its colour across restarts and both looks stay readable.
+pub fn swatch(n: usize) -> &'static Swatch {
+    &PALETTE[n % PALETTE.len()]
+}
+
+impl Swatch {
+    /// The shade for one look.
+    pub fn color(&self, mode: Mode) -> Color32 {
+        let rgb = match mode {
+            Mode::Light => self.light,
+            Mode::Dark => self.dark,
+        };
+        Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Light,
@@ -30,6 +102,11 @@ impl Mode {
             Mode::Light => "light",
             Mode::Dark => "dark",
         }
+    }
+
+    /// The shade of palette colour `n` for this look.
+    pub fn swatch(self, n: usize) -> Color32 {
+        swatch(n).color(self)
     }
 
     /// Colour used for a target that is currently online.

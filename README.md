@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 7 Unit-Tests + 34 Integrationstests (ohne GUI)
+cargo test                   # 7 Unit-Tests + 39 Integrationstests (ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -45,6 +45,15 @@ Klick auf dasselbe Ziel lässt den Editor samt Eingabe stehen; schließen tun nu
 Escape, Speichern oder ein Klick auf eine andere Zeile — dabei wird vorher gespeichert.
 **Entfernen** gibt es im Editor links oben („entfernen“), also am Ziel, an dem man gerade
 arbeitet — nicht mehr oben rechts am markierten Eintrag.
+
+Jedes Ziel bekommt automatisch eine eigene Linienfarbe aus einer Palette von acht Farben
+(Blaugrün, Blau, Violett, Orange, Grün, Zyan, Rot, Gelb); im Diagramm, in der Legende, in der
+Liste links und in den Sparklines ist es immer dieselbe. Der Farb-Knopf im Editor stellt sie um:
+eine Farbe wählen oder mit „Auto“ die automatische wieder übernehmen. Was man wählt, wird als
+Nummer der Palette gespeichert und überlebt einen Neustart; ein Ziel, das per Hand gewählt ist,
+gibt seine Farbe für die automatischen frei. Sind mehr Ziele als Farben da, werden die Farben
+wieder verwendet. Die kleine Scheibe vor dem Namen bleibt davon unberührt — sie zeigt weiter den
+Zustand (grün/gelb/orange/rot).
 
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der
