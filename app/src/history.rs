@@ -262,36 +262,3 @@ pub struct Stats {
     /// Losses that were DNS failures rather than silent timeouts.
     pub dns_fails: usize,
 }
-
-impl Stats {
-    /// What gets written into the saved state file (drops the running sum).
-    pub fn snapshot(&self) -> StatsOut {
-        StatsOut {
-            total: self.total,
-            replies: self.replies,
-            losses: self.losses,
-            min: self.min,
-            max: self.max,
-            avg: self.avg,
-            median: self.median,
-            p95: self.p95,
-            loss_pct: self.loss_pct,
-            outliers: self.outliers,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct StatsOut {
-    pub total: usize,
-    pub replies: usize,
-    pub losses: usize,
-    pub min: f32,
-    pub max: f32,
-    pub avg: f64,
-    pub median: f32,
-    pub p95: f32,
-    pub loss_pct: f64,
-    /// Replies above `avg + 3 * stddev`; the chart marks exactly these samples.
-    pub outliers: usize,
-}

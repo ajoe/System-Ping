@@ -5,7 +5,6 @@
 //! show a live latency chart, statistics, status list, alerts and CSV export.
 
 #![windows_subsystem = "windows"]
-#![allow(dead_code)]
 
 // Everything lives in the library crate (`src/lib.rs`); this file is only the entry point,
 // so `tests/` can use the same code without a window.
