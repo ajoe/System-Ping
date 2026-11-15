@@ -34,7 +34,9 @@ system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausg
 ```
 
 Ziele werden über das Einstellungsfeld angelegt (Name + Host). Der Standard-Gateway wird
-beim ersten Start aus `ipconfig`/`route` geraten.
+beim ersten Start aus `ipconfig`/`route` geraten. Ein **Doppelklick** auf ein Ziel in der
+linken Liste öffnet den Inline-Editor: Host und Name lassen sich ändern, Enter speichert,
+Escape verwirft.
 
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der
