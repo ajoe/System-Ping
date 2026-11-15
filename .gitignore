@@ -5,6 +5,7 @@ app/target/
 # Einmalige Diagnose-Skripte, Build-Mitschnitte und alte Builds: alles nach _trash/
 # verschoben (wiederherstellbar, aber nicht im Repo). Der Ordner bleibt aussen vor.
 /_trash/
+_trash/
 *.log
 *.ps1
 cfg.txt
