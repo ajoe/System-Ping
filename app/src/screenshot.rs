@@ -88,14 +88,19 @@ impl Screencap {
         // below the chart's own y-scaling so the outlier rings land inside the plot), and
         // an outage streak on the second target. The last sample sits just under "now" so
         // every target keeps its newest-value dot in the live window.
-        let n = 110usize;
+        //
+        // One hundred samples are enough for a minute, but a day drawn from 110 points would
+        // be a dotted line, so wide windows get one point per pixel of the plot instead. The
+        // cap grows with the window (see `effective_max_samples`), so nothing is thrown away.
+        let n = ((self.app.options.horizon_secs / 2.0) as usize).clamp(110, 3_000);
         // Samples must span the whole visible window: `horizon / n` seconds apart, with the
         // newest one a step before "now". A fixed spacing (2 s) would only cover part of a
         // wider window and leave the right side of the plot empty.
         let step = horizon / n as f64;
         for (i, t) in self.app.targets.iter_mut().enumerate() {
             // Keep the seeded history inside the configured window.
-            t.series.set_cap(self.app.options.max_samples);
+            t.series
+                .set_cap(crate::app::effective_max_samples(&self.app.options));
             for k in 0..n {
                 let base = match i {
                     0 => 2.4,
@@ -107,17 +112,22 @@ impl Screencap {
                     .fract()
                     * base
                     * 0.45;
-                let rtt = if i == 1 && (62..=71).contains(&k) {
+                // The outage and the spike used to be fixed sample numbers, which only land
+                // inside the picture while `n` is around 110. As fractions of the trace they
+                // stay visible in a minute and in a day alike.
+                let outage = i == 1 && (0.56..=0.64).contains(&(k as f64 / n as f64));
+                let rtt = if outage {
                     TIMEOUT
-                } else if k % 37 == 0 {
+                } else if k % ((n / 3).max(1)) == 0 {
                     base * 2.4 + 25.0
                 } else {
                     base + jitter
                 };
                 t.series.record(
                     base_t - (n - k) as f64 * step,
-                    // The demo history is synthetic, so its absolute time is derived from the
-                    // same relative stamps the chart uses.
+                    // Absolute counterpart of the relative stamp. A wide window is labelled
+                    // with the wall clock, so a seeded sample has to carry a believable time of
+                    // day too — derived from the same spacing the chart uses.
                     now_ms - ((n - k) as i64) * (step * 1000.0) as i64,
                     rtt,
                     if rtt >= TIMEOUT {
@@ -144,10 +154,18 @@ impl Screencap {
         n * self.app.targets.len()
     }
 
-    /// Show one of the four views in the shot.
+    /// Show one of the four views in the shot, or set the chart window from a length
+    /// (`--shot out.png 24h`). Both happen before `seed` plants the history, because that
+    /// history is spread over whatever window is current (see `update`). The two can be
+    /// combined — `settings 24h` pictures the settings panel of a day window.
     fn set_view(&mut self, name: &str) {
-        if let Some(v) = view_for(name) {
-            self.app.view = v;
+        for word in name.split_whitespace() {
+            if let Some(v) = view_for(word) {
+                self.app.view = v;
+            } else if let Some(secs) = horizon_from_arg(word) {
+                self.app.options.horizon_secs = secs;
+                self.app.sync_caps();
+            }
         }
     }
 
@@ -160,12 +178,15 @@ impl Screencap {
 impl eframe::App for Screencap {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.frames_left == 120 {
-            // Seeding happens in this same pass, so the history is stamped on the clock
-            // that will be current at capture (see `seed`).
-            self.seeded = self.seed();
+            // The view and the window length come from the command line and have to be in
+            // place before the history is planted: `seed` spreads its samples over whatever
+            // window is current.
             if let Some(v) = self.view.take() {
                 self.set_view(&v);
             }
+            // Seeding happens in this same pass, so the history is stamped on the clock
+            // that will be current at capture (see `seed`).
+            self.seeded = self.seed();
             // `--shot out.png edit` shows the inline editor of the first target.
             if self.edit_row == Some(0) {
                 self.app.begin_edit(0);
@@ -495,4 +516,37 @@ pub fn view_for(name: &str) -> Option<View> {
 /// Whether a shot argument asks for the inline editor to be open in the picture.
 pub fn wants_edit(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "edit" | "bearbeiten")
+}
+
+/// A shot argument may also name the chart window, so a day can be pictured without touching
+/// the saved settings: `--shot out.png 24h`. Returns seconds, or `None` if the word is not a
+/// length. Both German and English spellings are accepted because the UI is German while the
+/// command line usually is not.
+pub fn horizon_from_arg(name: &str) -> Option<f32> {
+    let s = name.trim().to_ascii_lowercase();
+    // Longest unit first so „stunden“ is not read as a number with a stray suffix.
+    for (unit, secs) in [
+        ("sekunden", 1.0f32),
+        ("stunden", 3_600.0),
+        ("minute", 60.0),
+        ("minuten", 60.0),
+        ("stunde", 3_600.0),
+        ("sekunde", 1.0),
+        ("sek", 1.0),
+        ("min", 60.0),
+        ("std", 3_600.0),
+        ("hrs", 3_600.0),
+        ("hr", 3_600.0),
+        ("s", 1.0),
+        ("h", 3_600.0),
+    ] {
+        if let Some(rest) = s.strip_suffix(unit) {
+            let n: f32 = rest.trim().parse().ok()?;
+            if n > 0.0 {
+                return Some(n * secs);
+            }
+            return None;
+        }
+    }
+    None
 }

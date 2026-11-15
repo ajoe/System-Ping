@@ -1,6 +1,6 @@
 //! The whole interface: top bar, target list, the four views, event log, status bar.
 
-use crate::app::{App, TargetKind, View};
+use crate::app::{self, App, TargetKind, View};
 use crate::history;
 use crate::theme::{self, Mode};
 use egui::{Color32, FontId, Label, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
@@ -40,6 +40,15 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                     egui::TextEdit::singleline(&mut app.new_label).hint_text("Name (optional)"),
                 );
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let combo = egui::ComboBox::from_id_salt("horizon_top")
+                    .selected_text(horizon_label(app.options.horizon_secs))
+                    .width(72.0)
+                    .show_ui(ui, |ui| {
+                        for c in app::HORIZON_CHOICES {
+                            ui.selectable_value(&mut app.options.horizon_secs, c.secs, c.label);
+                        }
+                    });
+                let _ = combo.response.on_hover_text("Zeitfenster des Diagramms");
                 if (enter && !(host_buf.is_empty() && label_buf.is_empty()))
                     || ui.button("+ Ziel").clicked()
                 {
@@ -620,6 +629,14 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 
     // Vertical grid + time labels.
     let step = nice_step(horizon);
+    // Wide windows are labelled with the wall clock, so a sample's real stamp is needed to
+    // turn an axis position into a time of day. All series share one origin (see `reanchor`),
+    // so any target that has measured gives the offset between the two clocks.
+    let clock_at_ms = app.targets.iter().find_map(|t| {
+        t.series
+            .last()
+            .map(|s| s.at_ms - (s.t_secs * 1000.0) as i64)
+    });
     let mut gt = (t_min / step).ceil() * step;
     while gt <= t_max {
         let x = map_x(gt, t_min, t_max, rect);
@@ -627,10 +644,14 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
             Stroke::new(1.0_f32, m.grid()),
         );
+        let label = match clock_at_ms {
+            Some(origin) => fmt_axis(gt, horizon, Some(origin + (gt * 1000.0) as i64)),
+            None => fmt_axis(gt, horizon, None),
+        };
         ui.painter().text(
             egui::pos2(x, rect.bottom() + 3.0),
             egui::Align2::LEFT_TOP,
-            fmt_clock(gt),
+            label,
             FontId::monospace(10.0),
             m.axis_text(),
         );
@@ -883,13 +904,41 @@ fn map_y(ms: f32, y_max: f32, r: egui::Rect) -> f32 {
     r.bottom() - 2.0 - u * (r.height() - 4.0)
 }
 
-fn nice_step(horizon: f64) -> f64 {
-    for s in [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0] {
+/// Distance between two vertical grid lines for a chart window. `pub` so a test can check that
+/// a day does not get the minute spacing of a short window.
+pub fn nice_step(horizon: f64) -> f64 {
+    // Hours and days are the part that matters for a wide window: without them a day would
+    // fall back to the 900 s default and print sixty grid lines on top of each other.
+    for s in [
+        1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1_800.0, 3_600.0,
+        7_200.0, 10_800.0, 14_400.0, 21_600.0, 43_200.0, 86_400.0,
+    ] {
         if horizon / s <= 12.0 {
             return s;
         }
     }
-    900.0
+    86_400.0
+}
+
+/// A tick label on the time axis. Short windows count in minutes and seconds; from about an
+/// hour upwards that would run past 99 minutes, so wider windows show the wall clock instead —
+/// which is also what makes a day readable. `clock` says whether a real time of day is known.
+/// `pub` for the tests that check what a day's axis prints.
+pub fn fmt_axis(secs: f64, horizon: f64, clock: Option<i64>) -> String {
+    if horizon < 2.0 * 3_600.0 {
+        let s = secs.max(0.0) as i64;
+        format!("{:02}:{:02}", s / 60, s % 60)
+    } else if let Some(at_ms) = clock {
+        use chrono::{Local, TimeZone};
+        match Local.timestamp_millis_opt(at_ms).single() {
+            Some(t) => t.format("%H:%M").to_string(),
+            None => String::from("?"),
+        }
+    } else {
+        // No absolute stamp to show (a session that has not measured yet): count in hours.
+        let s = secs.max(0.0) as i64;
+        format!("{:02}:{:02} h", s / 3_600, (s % 3_600) / 60)
+    }
 }
 
 fn fmt_clock(secs: f64) -> String {
@@ -1205,6 +1254,29 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
 
 /* --------------------------------------------------------------- settings */
 
+/// The label of the current window length, and a fallback for a value from an older file that
+/// is not one of the presets.
+fn horizon_label(secs: f32) -> String {
+    app::HORIZON_CHOICES
+        .iter()
+        .find(|c| c.secs == secs)
+        .map(|c| String::from(c.label))
+        .unwrap_or_else(|| format!("{secs:.0} s"))
+}
+
+/// What a window length means in practice: how many values it holds and how much memory that
+/// is per target. A day is the first choice where the number is worth showing.
+fn horizon_hint(secs: f32) -> String {
+    let samples = app::samples_for_horizon(secs, 1.0);
+    if secs < 3_600.0 {
+        String::from("das Diagramm zeigt diesen Zeitraum")
+    } else {
+        let mib =
+            samples as f64 * std::mem::size_of::<history::Sample>() as f64 / (1024.0 * 1024.0);
+        format!("rund {samples} Messwerte pro Ziel ({mib:.1} MiB) bei 1 s Abstand")
+    }
+}
+
 fn settings(ui: &mut Ui, app: &mut App) {
     let mut dirty = false;
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1225,11 +1297,55 @@ fn settings(ui: &mut Ui, app: &mut App) {
             });
             ui.horizontal(|ui| {
                 ui.label("Zeitfenster");
-                if ui.add(egui::Slider::new(&mut app.options.horizon_secs, 15.0..=900.0).logarithmic(true).suffix(" s")).changed() { dirty = true; }
+                // Die Voreinstellungen reichen bis 24 h. Ein Schieberegler wäre hier falsch:
+                // zwischen 15 s und einem Tag sieht man den Unterschied von Minuten nicht.
+                egui::ComboBox::from_id_salt("horizon")
+                    .selected_text(horizon_label(app.options.horizon_secs))
+                    .show_ui(ui, |ui| {
+                        for c in app::HORIZON_CHOICES {
+                            if ui
+                                .selectable_value(&mut app.options.horizon_secs, c.secs, c.label)
+                                .on_hover_text(horizon_hint(c.secs))
+                                .changed()
+                            {
+                                dirty = true;
+                            }
+                        }
+                    });
+                ui.label(
+                    RichText::new(horizon_hint(app.options.horizon_secs))
+                        .weak()
+                        .size(11.5),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("Max. Messwerte je Ziel");
-                if ui.add(egui::DragValue::new(&mut app.options.max_samples).range(128..=65_536).speed(64)).changed() { dirty = true; }
+                // Ein Tag bei einer Sekunde Abstand sind 86 400 Werte pro Ziel. Die Obergrenze
+                // richtet sich deshalb nach dem Zeitfenster statt nach einem festen Maximum.
+                let cap = app::effective_max_samples(&app.options);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut app.options.max_samples)
+                            .range(0..=cap)
+                            .speed(256)
+                            .custom_formatter(|v, _| {
+                                if v == 0.0 {
+                                    String::from("auto")
+                                } else {
+                                    format!("{}", v as usize)
+                                }
+                            }),
+                    )
+                    .on_hover_text(format!(
+                        "0 = automatisch ({} für das aktuelle Fenster). Obergrenze ist das \
+                         Zehnfache des Fensters bei {} s Abstand.",
+                        app::samples_for_horizon(app.options.horizon_secs, app.options.interval_secs),
+                        app.options.interval_secs
+                    ))
+                    .changed()
+                {
+                    dirty = true;
+                }
             });
         });
 

@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 7 Unit-Tests + 25 Integrationstests (ohne GUI)
+cargo test                   # 7 Unit-Tests + 34 Integrationstests (ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -32,6 +32,9 @@ system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart
 system-ping.exe --theme <hell|dunkel>  Aussehen für diese Sitzung überschreiben
 system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausgeben, beenden
 ```
+
+Das Bild kann auch ein anderes Zeitfenster zeigen, ohne die gespeicherten Einstellungen
+anzufassen: `--shot tagesbild.png 24h` (auch „12 h“, „30 min“, „90 s“).
 
 Ziele werden über das Einstellungsfeld angelegt (Name + Host). Der Standard-Gateway wird
 beim ersten Start aus `ipconfig`/`route` geraten. Ein **Klick** auf ein Ziel in der
@@ -56,6 +59,17 @@ collect: 15 Messwerte in dieser Zeit, davon 15 Antworten
 ```
 
 Der Lauf speichert sein Ergebnis, also zeigt `--export-csv` direkt danach dieselben Werte.
+
+## Diagramm über 24 Stunden
+
+Das Zeitfenster des Diagramms ist eine Voreinstellung, kein Schieberegler — von 15 s bis
+**24 h** (oben in der Leiste und in den Einstellungen). Ab zwei Stunden werden die Achsen mit
+der Uhrzeit beschriftet, sonst mit Minuten und Sekunden.
+
+Damit ein Tag kein Loch im Diagramm ist, wächst die Zahl der Messwerte, die ein Ziel behält,
+automatisch mit dem Fenster: „Max. Messwerte je Ziel“ steht deshalb auf **auto** (0). Bei 24 h
+und einer Sekunde Abstand sind das rund 260 000 Werte pro Ziel (etwa 4 MiB); wer eine Zahl
+einträgt, bekommt sie, alles unter 1 024 wird auf diese Untergrenze gehoben.
 
 ## Zustand und Dateien
 

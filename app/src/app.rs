@@ -70,7 +70,10 @@ impl Target {
             host: host.into(),
             kind,
             enabled: true,
-            series: Series::new(2048),
+            // The real capacity comes from the app's settings (`sync_caps`), which this
+            // constructor cannot see. It only has to be big enough for a target that is added
+            // and measured before the first sync, so it uses the same floor the settings use.
+            series: Series::new(MIN_SAMPLES),
             last_probe_secs: f64::NAN,
             last_rtt: f32::NAN,
             streak_bad: 0,
@@ -88,9 +91,11 @@ pub struct AppOptions {
     pub timeout_ms: u32,
     /// How many probes may run at the same time.
     pub concurrency: usize,
-    /// Chart window width in seconds.
+    /// Chart window width in seconds. [`horizon_choices`] offers presets up to a day.
     pub horizon_secs: f32,
-    /// Max samples kept per target.
+    /// Max samples kept per target. `0` means "as many as the chart window needs" — see
+    /// [`samples_for_horizon`]. That default is what makes a 24 h window possible at all: with
+    /// a fixed cap of 2048 the day would be cut off after half an hour.
     pub max_samples: usize,
     pub sound_alerts: bool,
     pub system_tray_icon: bool,
@@ -112,6 +117,98 @@ fn default_theme() -> String {
     String::from("system")
 }
 
+/// One choice of the chart window: a label and its length in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HorizonChoice {
+    pub secs: f32,
+    pub label: &'static str,
+}
+
+/// The window lengths the chart offers, shortest first. A day is the longest on purpose:
+/// anything wider needs a coarser probe interval to stay readable.
+pub const HORIZON_CHOICES: &[HorizonChoice] = &[
+    HorizonChoice {
+        secs: 15.0,
+        label: "15 s",
+    },
+    HorizonChoice {
+        secs: 30.0,
+        label: "30 s",
+    },
+    HorizonChoice {
+        secs: 60.0,
+        label: "1 min",
+    },
+    HorizonChoice {
+        secs: 120.0,
+        label: "2 min",
+    },
+    HorizonChoice {
+        secs: 300.0,
+        label: "5 min",
+    },
+    HorizonChoice {
+        secs: 600.0,
+        label: "10 min",
+    },
+    HorizonChoice {
+        secs: 900.0,
+        label: "15 min",
+    },
+    HorizonChoice {
+        secs: 1_800.0,
+        label: "30 min",
+    },
+    HorizonChoice {
+        secs: 3_600.0,
+        label: "1 h",
+    },
+    HorizonChoice {
+        secs: 7_200.0,
+        label: "2 h",
+    },
+    HorizonChoice {
+        secs: 14_400.0,
+        label: "4 h",
+    },
+    HorizonChoice {
+        secs: 21_600.0,
+        label: "6 h",
+    },
+    HorizonChoice {
+        secs: 43_200.0,
+        label: "12 h",
+    },
+    HorizonChoice {
+        secs: 86_400.0,
+        label: "24 h",
+    },
+];
+
+/// The stored minimum for [`AppOptions::max_samples`]. Below this a chart window of an hour
+/// would not fit its own samples.
+pub const MIN_SAMPLES: usize = 1_024;
+
+/// How many samples one target has to keep to fill `horizon_secs` at `interval_secs`, with a
+/// little slack so the newest sample is never the limit. The chart window alone is not enough:
+/// panning back walks through three windows of history (see the trim in `tick`), and the day
+/// view would otherwise lose everything outside what is visible.
+pub fn samples_for_horizon(horizon_secs: f32, interval_secs: f32) -> usize {
+    let interval = interval_secs.max(0.25) as f64;
+    let needed = (f64::from(horizon_secs) * 3.0 / interval).ceil() as usize + 64;
+    needed.clamp(MIN_SAMPLES, 1_000_000)
+}
+
+/// The cap a target should use for the current settings: the explicit choice from the settings
+/// panel, or the number the chart window needs when that choice is `0` (the default).
+pub fn effective_max_samples(options: &AppOptions) -> usize {
+    if options.max_samples == 0 {
+        samples_for_horizon(options.horizon_secs, options.interval_secs)
+    } else {
+        options.max_samples.max(MIN_SAMPLES)
+    }
+}
+
 impl Default for AppOptions {
     fn default() -> Self {
         Self {
@@ -119,7 +216,9 @@ impl Default for AppOptions {
             timeout_ms: 2000,
             concurrency: 4,
             horizon_secs: 60.0,
-            max_samples: 2048,
+            // 0 = "so viele, wie das Zeitfenster braucht" (siehe `effective_max_samples`). Ein
+            // fester Wert wäre bei 24 h ein Schnitt nach einer halben Stunde.
+            max_samples: 0,
             sound_alerts: false,
             system_tray_icon: true,
             autostart: false,
@@ -562,7 +661,7 @@ impl App {
     }
 
     pub fn sync_caps(&mut self) {
-        let cap = self.options.max_samples;
+        let cap = effective_max_samples(&self.options);
         for t in &mut self.targets {
             t.series.set_cap(cap);
         }
@@ -913,6 +1012,13 @@ impl App {
         let kind = classify(&host);
         self.targets
             .push(Target::new(id, label, host.clone(), kind));
+        // A fresh target has the constructor's floor; the window it has to hold is only known
+        // here. Without this a new target would keep 24 h of data in a 1 024-sample ring.
+        self.targets
+            .last_mut()
+            .unwrap()
+            .series
+            .set_cap(effective_max_samples(&self.options));
         self.new_host.clear();
         self.new_label.clear();
         self.selected = self.targets.len() - 1;
@@ -1062,8 +1168,9 @@ impl App {
     }
 
     pub fn reset_stats(&mut self) {
+        let cap = effective_max_samples(&self.options);
         for t in &mut self.targets {
-            t.series = Series::new(self.options.max_samples);
+            t.series = Series::new(cap);
             t.last_rtt = f32::NAN;
             t.last_probe_secs = f64::NAN;
             t.streak_bad = 0;
