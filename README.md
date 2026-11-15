@@ -44,7 +44,9 @@ die Details des Ziels (Messwerte, ø, min/max, Verluste im sichtbaren Zeitfenste
 Klick auf dasselbe Ziel lässt den Editor samt Eingabe stehen; schließen tun nur Abbrechen,
 Escape, Speichern oder ein Klick auf eine andere Zeile — dabei wird vorher gespeichert.
 **Entfernen** gibt es im Editor links oben („entfernen“), also am Ziel, an dem man gerade
-arbeitet — nicht mehr oben rechts am markierten Eintrag.
+arbeitet — nicht mehr oben rechts am markierten Eintrag. In den Einstellungen gibt es deshalb
+keine Ziel-Gruppe mehr; was dort übrig blieb (das Löschen des Verlaufs), heißt jetzt **„Messwerte
+löschen“** bei den Daten und betrifft ausdrücklich alle Ziele.
 
 Jedes Ziel bekommt automatisch eine eigene Linienfarbe aus einer Palette von acht Farben
 (Blaugrün, Blau, Violett, Orange, Grün, Zyan, Rot, Gelb); im Diagramm, in der Legende, in der

@@ -1504,30 +1504,9 @@ fn settings(ui: &mut Ui, app: &mut App) {
 
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.label(RichText::new("Ziel").strong());
-            if app.selected < app.targets.len() {
-                let t = &app.targets[app.selected];
-                ui.label(format!("{} — {}", t.label, t.host));
-                ui.label(format!("Art: {}", t.kind.label()));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Prüfung zurücksetzen").clicked() {
-                        app.reset_stats();
-                    }
-                    if ui.button("Ziel entfernen").clicked() {
-                        // Removing a target would shift the index the inline editor points at, so
-                        // any open editor is committed first.
-                        app.close_edit();
-                        app.remove_selected();
-                    }
-                });
-            } else {
-                ui.label(RichText::new("Kein Ziel ausgewählt.").weak());
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
+            // Früher stand hier eine eigene Gruppe „Ziel“ mit „Ziel entfernen“ und „Prüfung
+            // zurücksetzen“. Das Entfernen passiert jetzt am Ziel selbst (Inline-Editor), und ein
+            // Knopf, der das gerade markierte Ziel traf, war zu leicht misszuverstehen.
             ui.label(RichText::new("Daten").strong());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -1537,6 +1516,16 @@ fn settings(ui: &mut Ui, app: &mut App) {
                 }
                 if ui.button("Speichern").clicked() {
                     app.save_now();
+                }
+                // Betrifft alle Ziele — deshalb sagt der Knopf das auch. Ein offener Editor wird
+                // vorher übernommen, sonst verschwinden die Werte unter den offenen Eingaben weg.
+                if ui
+                    .button("Messwerte löschen")
+                    .on_hover_text("Verlauf und Statistik aller Ziele leeren. Die Ziele selbst bleiben erhalten.")
+                    .clicked()
+                {
+                    app.close_edit();
+                    app.reset_stats();
                 }
                 ui.label(RichText::new("Einstellungen und Verlauf werden automatisch gesichert.").weak().size(11.5));
             });
