@@ -127,15 +127,11 @@ struct PersistedIn {
 /// The variable is process-wide, so a caller that sets it for one pass must not let another
 /// thread read it at the same time — `collect_once` takes a directory and keeps the variable
 /// set for the whole pass instead of leaving that to the caller.
+///
+/// Which folder is used when nothing is forced differs by system (next to the binary on Windows,
+/// the per-user data folder on Linux and macOS) and is decided by [`crate::platform::statedir`].
 pub fn state_dir() -> PathBuf {
-    match std::env::var_os("SYSTEM_PING_STATE_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        // Prefer a writable folder next to the executable; fall back to temp.
-        _ => std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(std::env::temp_dir),
-    }
+    crate::platform::statedir::default_dir()
 }
 
 pub fn state_path() -> PathBuf {

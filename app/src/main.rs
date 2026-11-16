@@ -4,7 +4,10 @@
 //! Core features: ping several targets on a schedule, keep per-target history,
 //! show a live latency chart, statistics, status list, alerts and CSV export.
 
-#![windows_subsystem = "windows"]
+// On Windows this is a GUI program: without the attribute the console subsystem would start with
+// it and every launch from Explorer would leave a black terminal behind. Linux and macOS have no
+// equivalent switch — a GUI program there simply never gets a terminal unless one started it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 // Everything lives in the library crate (`src/lib.rs`); this file is only the entry point,
 // so `tests/` can use the same code without a window.

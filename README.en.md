@@ -2,8 +2,8 @@
 
 [Deutsche Fassung: README.md](README.md)
 
-A small network latency monitor for Windows: ping several targets at an interval, keep a history
-per target, live chart, statistics, status list, alerts and CSV export.
+A small network latency monitor for Windows, Linux and macOS: ping several targets at an interval,
+keep a history per target, live chart, statistics, status list, alerts and CSV export.
 
 Built as a clean-room re-implementation: the interface follows screenshots of a commercial tool,
 the code is entirely independent (Rust + [egui/eframe]).
@@ -14,37 +14,78 @@ the choice is saved together with the other options.
 
 ## Building
 
-A normal Rust toolchain setup (`rustup`) is required, MSVC by default on Windows.
-`app/.cargo/config.toml` therefore only holds a suppression filter for a misleading linker warning
-from `ring`; the file can be deleted and the project builds unchanged.
+A normal Rust toolchain setup (`rustup`) is required — the MSVC build on Windows. On Linux, besides
+the compiler you also need the X11/Wayland development packages, because `eframe` binds directly
+against the system libraries:
+
+```sh
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libgl1-mesa-dev libx11-dev libxcursor-dev \
+                 libxi-dev libxinerama-dev libxrandr-dev libwayland-dev libxkbcommon-dev
+# Fedora
+sudo dnf install gcc mesa-libGL-devel libX11-devel libXcursor-devel libXi-devel \
+                 libXinerama-devel libXrandr-devel wayland-devel libxkbcommon-devel
+```
+
+macOS only needs the command line tools (`xcode-select --install`). On Windows,
+`app/.cargo/config.toml` holds nothing but a suppression filter for a misleading linker warning from
+`ring`; the file can be deleted and the project builds unchanged.
 
 ```sh
 cd app
-cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 62 tests (12 unit + 50 integration, no GUI)
+cargo build --release        # -> app/target/release/system-ping(.exe)
+cargo test                   # 82 tests (32 unit + 50 integration, no GUI)
 cargo clippy --all-targets   # clean
 ```
 
-The tests need no internet: they ping `127.0.0.1` with the real `ping.exe`.
+Other systems can be checked by hand (type check only, without binding their libraries):
+
+```sh
+rustup target add x86_64-apple-darwin x86_64-unknown-linux-gnu
+cargo check --target x86_64-unknown-linux-gnu --profile test --lib   # no warnings
+```
+
+The tests need no internet: they ping `127.0.0.1` with the system's own `ping`.
+
+### What differs per platform
+
+Everything a given OS does differently is fenced off in `app/src/platform/` — the rest of the app
+never asks which system it is on:
+
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| state folder | next to the `.exe` (portable) | `$XDG_DATA_HOME/system-ping`, else `~/.local/share/system-ping` | `~/Library/Application Support/system-ping` |
+| ping call | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <s>` |
+| gateway guess | `route print`, else `ipconfig` | `ip route show`, else `netstat -rn` | `route -n get default`, else `netstat -rn` |
+| autostart | `HKCU\...\Run` | not offered | not offered |
+| file icon | embedded in the `.exe` | `.desktop` entry (not implemented) | `.icns` in a bundle (not implemented) |
+
+Missing features answer `false`/`None` instead of pretending: on Linux and macOS the autostart
+button in the top bar and the checkbox in the settings do not appear at all, and the settings screen
+explains that the feature is unsupported there instead. `SYSTEM_PING_STATE_DIR` overrides the folder
+on every system.
 
 ### The executable's icon
 
-`app/build.rs` attaches the Windows resources at build time: `assets/icon.ico` as the file icon
-(16/32/48/64/256 px) and a version block with name, version and language. That is done by the
-[`winresource`] crate, which turns a `.rc` into a `.res`; the normal linker embeds it, so no extra
-step and no post-processing of the `.exe` is needed.
+Only Windows knows an icon embedded inside the program file: `app/build.rs` attaches the resources
+at build time — `assets/icon.ico` as the file icon (16/32/48/64/256 px) plus a version block. The
+[`winresource`] crate turns that into a `.res`; the normal linker embeds it, so no extra step and no
+post-processing of the `.exe` is needed. On Linux and macOS `build.rs` does nothing, because there
+the icon travels as a file next to the program.
 
 ```sh
 cargo build --release   # the .res appears in app/target/release/build/system-ping/*/out/
 ```
 
-When `assets/icon.ico` is newer than the last translation, `build.rs` rebuilds
-(`cargo:rerun-if-changed`). The window icon at runtime is independent of that and embedded directly
-in `main.rs` (`assets/icon.png`), so `cargo run` shows an icon too.
+The window icon at runtime is independent of that and embedded directly in `main.rs`
+(`assets/icon.png`), so `cargo run` shows an icon on every system too.
 
 [`winresource`]: https://crates.io/crates/winresource
 
 ## Using it
+
+The program is called `system-ping` (`system-ping.exe` on Windows). The examples below are written
+the Windows way; on Linux and macOS read `./target/release/system-ping` in their place.
 
 ```
 system-ping.exe                        open the window
@@ -87,8 +128,9 @@ The picture can also show a different time window without touching the saved set
 the file, so `--shot pic.png stats 6h --theme dark`; an option word such as `--theme` otherwise
 ends the list of views — or the picture would land on the chart.
 
-Targets are created in the settings panel (name + host). The default gateway is guessed from
-`ipconfig`/`route` on the first start. A **click** on a target in the left list opens the inline
+Targets are created in the settings panel (name + host). The default gateway is guessed from the
+system's own routing table on the first start (`route print`/`ipconfig`, `ip route show`,
+`route -n get default`). A **click** on a target in the left list opens the inline
 editor: name, address, category and whether it is measured. Enter or “✓ Save” commits, Escape or
 “✗ Cancel” discards. The editor also shows the target's details (measurements, mean, min/max,
 losses in the visible time window). A second click on the same target leaves the editor standing
@@ -256,8 +298,9 @@ state folder and opens it; “⌂ Data” in the header does nothing else than s
 
 ## State and files
 
-* State folder: `%LOCALAPPDATA%\system-ping\`, overridable with the environment variable
-  `SYSTEM_PING_STATE_DIR`.
+* State folder: **next to the program file** on Windows (portable), `$XDG_DATA_HOME/system-ping`
+  or `~/.local/share/system-ping` on Linux, and `~/Library/Application Support/system-ping` on
+  macOS. On every system it can be forced with the environment variable `SYSTEM_PING_STATE_DIR`.
 * `system-ping-state.json` — options plus history. Version 2 stores every measurement with an
   absolute Unix time in milliseconds; version 1 files (seconds since process start) are lifted onto
   a real time axis when loaded.
@@ -290,8 +333,9 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
 
 ## Folders
 
-* `app/` — the crate (sources in `app/src`, GUI-free tests in `app/tests`, `build.rs` for the
-  Windows resources, screenshots in `app/shots`)
+* `app/` — the crate (sources in `app/src`, including `app/src/platform/` for everything
+  OS-specific, GUI-free tests in `app/tests`, `build.rs` for the Windows resources, screenshots in
+  `app/shots`)
 * `assets/` — `icon.ico` (file icon) and `icon.png` (window icon at runtime)
 * `reference/` — screenshots of the original and own comparison pictures
 * `capture/` — notes about the reference material

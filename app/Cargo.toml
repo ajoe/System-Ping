@@ -7,7 +7,19 @@ license = "MIT"
 
 [dependencies]
 # GUI: eframe/egui (glow-Backend, eigene Software-Rasterung fuer Screenshots).
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+#
+# The crate builds for Windows, Linux and macOS. `default-features = false` is deliberate:
+# eframe's defaults add accesskit and a screen reader, which are not used here and pull in more
+# platform code than the app needs. `glow` keeps one renderer on every OS — no Metal or Vulkan
+# backend to get right per platform. The display back ends (wayland/x11) matter on Linux only;
+# Windows and macOS ignore them, so listing them costs nothing there and keeps one feature list
+# for all three instead of a table of cfg-specific variants.
+eframe = { version = "0.31", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "wayland",
+    "x11",
+] }
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
@@ -15,9 +27,13 @@ serde_json = "1"
 # Zeitstempel fuer Protokoll/CSV: nur clock+std, ohne zh-lc_time (das zieht icu_* nach
 # sich - und ein einziger Build-Linkfehler dort stoppt sonst den ganzen Aufbau).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-rfd = { version = "0.18.0", default-features = false }
+# The "save as…" dialog. On Windows it uses the native one, on macOS AppKit, and on Linux the
+# freedesktop portal over D-Bus — which needs no GTK installation, so a plain headless-ish distro
+# still gets a dialog. Exactly one of gtk3/gtk4/xdg-portal must be on for a Unix build (rfd's
+# build script insists), hence xdg-portal here and `default-features = false`.
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 # Bettet assets/icon.ico als RT_GROUP_ICON in die EXE ein, damit der Explorer ein echtes
 # Datei-Symbol zeigt (nicht nur das Fenster- und Taskleisten-Symbol aus main.rs).
 winresource = "0.1"

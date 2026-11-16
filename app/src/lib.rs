@@ -8,6 +8,7 @@ pub mod exporter;
 pub mod history;
 pub mod i18n;
 pub mod ping;
+pub mod platform;
 pub mod runtime;
 pub mod screenshot;
 pub mod store;

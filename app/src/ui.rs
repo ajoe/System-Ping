@@ -112,10 +112,12 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                     {
                         app.open_state_folder();
                     }
-                    // The autostart button is only visible while nothing is being measured.
-                    // `autostart_state()` is the registry's answer (looked up at startup, then kept
-                    // current); the raw counter alone would read "off" until the user presses this.
+                    // The autostart button is only visible while nothing is being measured, and only
+                    // where the OS has a mechanism we can actually write. `autostart_state()` is the
+                    // registry's answer (looked up at startup, then kept current); the raw counter
+                    // alone would read "off" until the user presses this.
                     if !app.running
+                        && crate::platform::autostart::is_supported()
                         && ui
                             .button(if app.autostart_state() == Some(true) {
                                 lang.autostart_on()
@@ -2282,15 +2284,24 @@ fn settings(ui: &mut Ui, app: &mut App) {
                 // does none of those things. The fields stay in the file for whoever implements them; a
                 // button that does nothing is worse than no button.
                 ui.horizontal(|ui| {
+                    let supported = crate::platform::autostart::is_supported();
                     let on = app.autostart_state() == Some(true);
                     let mut v = on;
-                    if ui.checkbox(&mut v, lang.autostart_checkbox()).changed() {
-                        app.set_autostart(v);
-                    }
-                    if app.autostart_state() == Some(false) {
-                        ui.label(
-                            RichText::new(lang.autostart_blocked()).color(app.theme_mode.warn()),
-                        );
+                    // Where the OS has no autostart mechanism we can actually reach, a box that
+                    // cannot be ticked says more than one that lies about having done something.
+                    ui.add_enabled_ui(supported, |ui| {
+                        if ui.checkbox(&mut v, lang.autostart_checkbox()).changed() {
+                            app.set_autostart(v);
+                        }
+                        if supported && app.autostart_state() == Some(false) {
+                            ui.label(
+                                RichText::new(lang.autostart_blocked())
+                                    .color(app.theme_mode.warn()),
+                            );
+                        }
+                    });
+                    if !supported {
+                        ui.label(RichText::new(lang.autostart_unsupported()));
                     }
                 });
             });

@@ -5,12 +5,14 @@
 //! the UI never blocks. The OS command is used on purpose: raw ICMP sockets
 //! need administrator rights, which a normal double-click launch does not have.
 //!
+//! Which command that is, and what its output means, is delegated to
+//! [`crate::platform::probe`] — this module only schedules probes and files their answers. That
+//! split is what lets the same engine drive `ping.exe` on Windows and `ping` on Linux or macOS
+//! without either system's rules leaking into the scheduler.
+//!
 //! Nothing in here touches eframe or egui, so the whole collection path can be driven
 //! from a test with no window (see `tests/collection.rs`).
 
-use std::borrow::Cow;
-use std::io::Read;
-use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -42,15 +44,10 @@ pub struct ProbeResult {
 
 /// Why a probe did not answer. The UI shows these next to the timeout so an
 /// outage looks different from a blocked or unresolvable host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeFail {
-    /// The host name did not resolve.
-    Resolve,
-    /// No reply within the timeout.
-    Timeout,
-    /// The OS ping could not be run or said something unexpected.
-    Error,
-}
+///
+/// Defined by [`crate::platform::probe`] and re-exported here, because that is where the phrases
+/// that decide it live — every system's `ping` explains a missing reply in its own words.
+pub use crate::platform::probe::ProbeFail;
 
 impl From<ProbeFail> for crate::history::Fail {
     fn from(f: ProbeFail) -> Self {
@@ -311,11 +308,8 @@ fn probe_once(job: &ProbeJob) -> Result<f32, ProbeFail> {
     if !host_is_safe(&job.host) {
         return Err(ProbeFail::Error);
     }
-    #[cfg(windows)]
-    let r = probe_windows(job);
-    #[cfg(not(windows))]
-    let r = probe_unix(job);
-    r
+    let plan = crate::platform::probe::plan("", &job.host, job.timeout_ms);
+    crate::platform::probe::run(&plan, job.timeout_ms)
 }
 
 /// Only allow characters that a real host name or IP address can contain. This
@@ -326,177 +320,6 @@ fn host_is_safe(host: &str) -> bool {
         && host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
-}
-
-/// Exposed for the integration tests, which ask it through `probe_blocking` — "does this host
-/// answer?" — using exactly the app's own rules. A private helper there would have to
-/// re-implement the parsing, and a bug in both places at once would then look like a pass.
-#[cfg(windows)]
-pub fn probe_windows(job: &ProbeJob) -> Result<f32, ProbeFail> {
-    // `ping -n 1` sends one echo request; `-w` is the per-reply timeout in ms.
-    let mut cmd = Command::new("ping");
-    cmd.args(["-n", "1", "-w"]);
-    cmd.arg(job.timeout_ms.to_string());
-    cmd.arg(&job.host);
-    run_and_parse(cmd, &["time=", "Zeit="], job.timeout_ms)
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "android"))]
-fn probe_unix(job: &ProbeJob) -> Result<f32, ProbeFail> {
-    let mut cmd = Command::new("ping");
-    cmd.args(["-c", "1", "-W"]);
-    // Unix ping takes whole seconds for the wait; round up to at least 1.
-    cmd.arg(((job.timeout_ms + 999) / 1000).to_string());
-    cmd.arg(&job.host);
-    run_and_parse(cmd, &["time="], job.timeout_ms)
-}
-
-#[cfg(not(any(
-    windows,
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "android"
-)))]
-fn probe_unix(_job: &ProbeJob) -> Result<f32, ProbeFail> {
-    Err(ProbeFail::Error)
-}
-
-fn run_and_parse(mut cmd: Command, markers: &[&str], timeout_ms: u32) -> Result<f32, ProbeFail> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        // Keep the ping window from flashing on every probe.
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return Err(ProbeFail::Error),
-    };
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 1500);
-    let mut buf = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let mut sink = Vec::new();
-        // Read with a hard deadline so a stuck ping can never hang the worker.
-        loop {
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                break;
-            }
-            let mut chunk = [0u8; 512];
-            match pipe.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => sink.extend_from_slice(&chunk[..n]),
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        // Windows ping prints in the OEM codepage; try UTF-8 then Latin-1. `from_utf8`
-        // consumes the buffer, so the output is never copied twice.
-        match String::from_utf8(sink) {
-            Ok(s) => buf = s,
-            Err(e) => buf = e.into_bytes().iter().map(|&b| b as char).collect(),
-        }
-    }
-
-    let _status = match child.wait() {
-        Ok(s) => s,
-        Err(_) => return Err(ProbeFail::Error),
-    };
-    // The exit code is deliberately dropped. `ping.exe` exits 2 when a host gives no reply and
-    // also when the name cannot be resolved (see `report.rs`, where the real run shows both), so
-    // the number cannot tell those two apart; the text can, and that is what decides here.
-    // ping exits non-zero when there was no reply, so the text decides:
-    // a name that did not resolve is different from a host that stayed silent.
-    match parse_rtt(&buf, markers) {
-        Some(v) => Ok(v),
-        None => Err(classify_failure(&buf)),
-    }
-}
-
-/// Sort out why there was no reply time in the output.
-fn classify_failure(text: &str) -> ProbeFail {
-    let t = text.to_ascii_lowercase();
-    const RESOLVE: &[&str] = &[
-        "could not find",
-        "name or service",
-        "unknown host",
-        "unbekannter",
-        "nicht gefunden",
-        "failed to resolve",
-        "no such host",
-    ];
-    const TIMEOUT: &[&str] = &[
-        "timed out",
-        "request timeout",
-        "zeitüberschreitung",
-        "zeitsberschreitung",
-        "100% loss",
-        "100 % verlust",
-        "keine antwort",
-    ];
-    if RESOLVE.iter().any(|m| t.contains(m)) {
-        ProbeFail::Resolve
-    } else if TIMEOUT.iter().any(|m| t.contains(m)) {
-        ProbeFail::Timeout
-    } else {
-        ProbeFail::Error
-    }
-}
-
-/// The value used for a reply that `ping.exe` prints as `<1ms`. It has to be a positive
-/// number so the chart and the loss statistics treat it as an answer, not a timeout.
-pub const SUB_MS_RTT: f32 = 0.5;
-
-/// Pull `time=42ms` / `time=1.2ms` (and the German `Zeit=…`) out of ping output.
-///
-/// The reply time is always printed as `<word><separator><number>ms`, but both parts differ by
-/// language: English uses `time=42ms`, German `Zeit=14ms`, and a sub-millisecond reply becomes
-/// `Zeit<1ms` / `time<1ms` with no digits of its own. So the scan looks for the time word and
-/// then skips whatever separator follows it, instead of insisting on one exact spelling.
-fn parse_rtt(text: &str, markers: &[&str]) -> Option<f32> {
-    for line in text.lines() {
-        for marker in markers {
-            // Match the time word only: `time=` / `Zeit=` are both `<word><separator>`, and a
-            // reply under a millisecond uses `<` instead of `=`, so the separator cannot be part
-            // of the search string.
-            let word = marker.trim_end_matches(['=', ' ']);
-            let mut from = 0usize;
-            // One reply line can carry the marker more than once; keep scanning so a marker in
-            // front of prose never hides the number behind it.
-            while let Some(rel) = line[from..].find(word) {
-                let pos = from + rel + word.len();
-                from = pos;
-                // `Zeit<1ms`: a reply faster than a millisecond prints with a `<` where the
-                // digits would start, so report "under one" rather than a lost packet.
-                if line[pos..].starts_with('<') {
-                    return Some(SUB_MS_RTT);
-                }
-                // Skip the separator (`=`, or nothing at all in some locales) before the number.
-                let tail = &line[pos..].trim_start_matches(['=', ' ']);
-                // Read the number straight out of the line instead of collecting it into a
-                // String first; only a decimal comma needs replacing before parsing.
-                let end = tail
-                    .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))
-                    .unwrap_or(tail.len());
-                let raw = tail[..end].trim_matches('.');
-                if raw.is_empty() {
-                    continue;
-                }
-                let cleaned = if raw.contains(',') {
-                    Cow::Owned(raw.replace(',', "."))
-                } else {
-                    Cow::Borrowed(raw)
-                };
-                if let Ok(v) = cleaned.parse::<f32>() {
-                    return Some(v);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// `ProbeFail` as the short label the UI and the CSV use.
@@ -524,62 +347,9 @@ pub fn probe_blocking(host: &str, timeout_ms: u32) -> Result<f32, ProbeFail> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_english_and_german() {
-        assert_eq!(
-            parse_rtt("Reply from 1.1.1.1: time=42ms", &["time="]),
-            Some(42.0)
-        );
-        assert_eq!(
-            parse_rtt("Antwort von 8.8.8.8: Zeit=1,53ms", &["Zeit="]),
-            Some(1.53)
-        );
-        assert_eq!(parse_rtt("Request timed out.", &["time="]), None);
-    }
-
-    /// `ping.exe` writes the reply time as `Zeit<1ms` on a fast hop (loopback, LAN gateway).
-    /// The `<` is not a digit, so the plain scan used to stop before any number and the probe
-    /// was filed as a timeout — which is why every local target showed a dead line.
-    #[test]
-    fn parses_sub_millisecond_times() {
-        // A reply under a millisecond has no digits of its own; report it as 0.5 ms, i.e.
-        // "faster than one", rather than pretending the host never answered.
-        assert_eq!(
-            parse_rtt("Antwort von 127.0.0.1: Zeit<1ms TTL=128", &["Zeit="]),
-            Some(0.5)
-        );
-        assert_eq!(parse_rtt("Reply from ::1: time<1ms", &["time="]), Some(0.5));
-        // A real number still wins, and the summary block at the end ("Minimum = 1ms,
-        // Maximum = 1ms") carries no `Zeit`, so a reply line is always what gets read.
-        assert_eq!(
-            parse_rtt("Reply from 8.8.8.8: Zeit=14ms TTL=111", &["Zeit="]),
-            Some(14.0)
-        );
-        assert_eq!(
-            parse_rtt(
-                "Antwort von 192.168.178.1: Bytes=32 Zeit=1ms TTL=64\n\
-                 Ca. Zeitangaben in Millisek.:\n    Minimum = 1ms, Maximum = 1ms",
-                &["Zeit="]
-            ),
-            Some(1.0)
-        );
-    }
-
-    #[test]
-    fn classifies_failures() {
-        assert_eq!(
-            classify_failure("Ping request could not find host foo.bar."),
-            ProbeFail::Resolve
-        );
-        assert_eq!(
-            classify_failure("Antwort von 10.0.0.1: Zeitüberschreitung des Anfor..."),
-            ProbeFail::Timeout
-        );
-        assert_eq!(classify_failure("Request timed out."), ProbeFail::Timeout);
-        assert_eq!(classify_failure("100% loss"), ProbeFail::Timeout);
-        assert_eq!(classify_failure(""), ProbeFail::Error);
-    }
-
+    /// The parsing rules themselves are tested where they live (`platform::probe::tests`), with
+    /// samples from all three systems. What this module has to guarantee is the part in front of
+    /// them: nothing that is not shaped like a host ever reaches the command line.
     #[test]
     fn rejects_bad_hosts() {
         assert!(!host_is_safe(""));
@@ -588,5 +358,27 @@ mod tests {
         assert!(host_is_safe("example.com"));
         assert!(host_is_safe("192.168.0.1"));
         assert!(host_is_safe("fe80::1"));
+    }
+
+    /// A rejected host must fail before a process is started, so a malformed target can never show
+    /// up as a mysterious "ping not found".
+    #[test]
+    fn unsafe_host_never_runs_a_command() {
+        assert_eq!(
+            probe_once(&ProbeJob {
+                id: 0,
+                host: "; rm".into(),
+                timeout_ms: 1000,
+            }),
+            Err(ProbeFail::Error)
+        );
+    }
+
+    /// The label table has to cover every variant — a new one would otherwise print nothing.
+    #[test]
+    fn every_failure_has_a_label() {
+        assert_eq!(fail_label(ProbeFail::Resolve), "DNS");
+        assert_eq!(fail_label(ProbeFail::Timeout), "timeout");
+        assert!(!fail_label(ProbeFail::Error).is_empty());
     }
 }

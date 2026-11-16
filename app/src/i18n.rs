@@ -118,14 +118,14 @@ macro_rules! texts {
                              back; double-clicking the chart or pressing Esc turns it on again" };
     (de data_folder_btn) => { "⌂ Daten" };
     (en data_folder_btn) => { "⌂ Data" };
-    (de tip_data_folder) => { "Zustandsordner im Explorer öffnen (Datei, Protokoll, Exporte)" };
-    (en tip_data_folder) => { "Open the state folder in Explorer (state file, protocol, exports)" };
+    (de tip_data_folder) => { "Zustandsordner im Dateimanager öffnen (Datei, Protokoll, Exporte)" };
+    (en tip_data_folder) => { "Open the state folder in the file manager (state file, protocol, exports)" };
     (de autostart_on) => { "Autostart: an" };
     (en autostart_on) => { "Autostart: on" };
     (de autostart_off) => { "Autostart: aus" };
     (en autostart_off) => { "Autostart: off" };
-    (de tip_autostart_top) => { "Beim Anmelden von Windows starten" };
-    (en tip_autostart_top) => { "Start when Windows signs in" };
+    (de tip_autostart_top) => { "Beim Anmelden starten" };
+    (en tip_autostart_top) => { "Start when you sign in" };
     (de stop_all) => { "■ Alle stoppen" };
     (en stop_all) => { "■ Stop all" };
     (de start_all) => { "▶ Alle starten" };
@@ -334,10 +334,12 @@ macro_rules! texts {
     (en tip_protocol_log) => { "Every measurement is written to a file at once, not only on export." };
     (de hint_protocol_path) => { "Standard: neben den gespeicherten Daten (protocol.csv)" };
     (en hint_protocol_path) => { "Default: next to the saved data (protocol.csv)" };
-    (de autostart_checkbox) => { "Beim Anmelden starten (Windows)" };
-    (en autostart_checkbox) => { "Start at Windows sign-in" };
+    (de autostart_checkbox) => { "Beim Anmelden starten" };
+    (en autostart_checkbox) => { "Start at sign-in" };
     (de autostart_blocked) => { "Autostart nicht möglich" };
     (en autostart_blocked) => { "Autostart not possible" };
+    (de autostart_unsupported) => { "Autostart wird von diesem System nicht unterstützt" };
+    (en autostart_unsupported) => { "This system does not support autostart" };
     (de export_csv) => { "CSV exportieren …" };
     (en export_csv) => { "Export CSV …" };
     (de tip_export_default) => { "Schreibt in den Ordner der gespeicherten Einstellungen" };
@@ -482,8 +484,8 @@ macro_rules! texts {
     (en msg_dialog_opened) => { "Save dialog opened …" };
     (de msg_export_cancelled) => { "Export abgebrochen." };
     (en msg_export_cancelled) => { "Export cancelled." };
-    (de msg_autostart_on_registry) => { "Autostart ist aktiv (Windows-Registry)." };
-    (en msg_autostart_on_registry) => { "Autostart is enabled (Windows registry)." };
+    (de msg_autostart_on_registry) => { "Autostart ist aktiv." };
+    (en msg_autostart_on_registry) => { "Autostart is enabled." };
     (de msg_autostart_off_registry) => { "Autostart ist deaktiviert." };
     (en msg_autostart_off_registry) => { "Autostart is disabled." };
     (de msg_folder_opened_fmt) => { "Ordner geöffnet: {dir}" };
@@ -669,6 +671,7 @@ impl Lang {
         hint_protocol_path,
         autostart_checkbox,
         autostart_blocked,
+        autostart_unsupported,
         export_csv,
         tip_export_default,
         save_as,

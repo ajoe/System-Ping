@@ -1781,9 +1781,10 @@ impl App {
         store::state_dir()
     }
 
-    /// Open the state folder in Windows Explorer. A separate process, because `explorer.exe`
-    /// would otherwise block until the window closes; failures stay silent and the status line
-    /// only says what was attempted.
+    /// Open the state folder in the system's file manager. A separate process, because the helper
+    /// would otherwise block until its window closes; failures stay silent and the status line only
+    /// says what was attempted. Which helper that is (`explorer.exe`, `open`, `xdg-open`) is decided
+    /// by [`crate::platform::folder`].
     pub fn open_state_folder(&mut self) {
         let dir = store::state_dir();
         self.status_msg = i18n::fill(
@@ -1791,7 +1792,7 @@ impl App {
             &[("dir", dir.display().to_string())],
         );
         std::thread::spawn(move || {
-            let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+            let _ = crate::platform::folder::open(&dir);
         });
     }
 
@@ -2176,49 +2177,11 @@ fn default_targets() -> Vec<Target> {
     ]
 }
 
-/// Best-effort default gateway from `ipconfig` / `route`; falls back to the
-/// common home-router address. Never blocks longer than a second.
+/// Best-effort default gateway from the system's own routing table; falls back to the common
+/// home-router address. The per-system commands and their column layouts live in
+/// [`crate::platform::gateway`]. Never blocks longer than a second.
 fn gateway_hint() -> String {
-    #[cfg(windows)]
-    {
-        if let Some(g) = windows_gateway() {
-            return g;
-        }
-    }
-    String::from("192.168.1.1")
-}
-
-#[cfg(windows)]
-fn windows_gateway() -> Option<String> {
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new("route");
-    cmd.args(["print", "0.0.0.0"]);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(0x0800_0000);
-    let out = cmd.output().ok()?;
-    let text: String = String::from_utf8_lossy(&out.stdout).to_string();
-    for line in text.lines() {
-        let l = line.trim();
-        if !l.starts_with("0.0.0.0") {
-            continue;
-        }
-        // Columns differ by language; the gateway is a dotted quad that is not
-        // the netmask (which is 0.0.0.0 or 255.*).
-        let mut ips: Vec<String> = Vec::new();
-        for tok in l.split_whitespace() {
-            if tok.matches('.').count() == 3 && tok.chars().all(|c| c.is_ascii_digit() || c == '.')
-            {
-                ips.push(tok.to_string());
-            }
-        }
-        for ip in ips.iter().skip(2) {
-            if !ip.starts_with("0.") && !ip.starts_with("255.") {
-                return Some(ip.clone());
-            }
-        }
-    }
-    None
+    crate::platform::gateway::default_gateway().unwrap_or_else(|| String::from("192.168.1.1"))
 }
 
 fn guess_label(host: &str) -> String {
@@ -2241,65 +2204,16 @@ fn classify(host: &str) -> TargetKind {
     TargetKind::Custom
 }
 
-/// Write or remove the HKCU Run entry that starts the app at logon.
+/// Write or remove the autostart entry that starts the app at sign-in. Which mechanism that is (the
+/// Windows `Run` key, nothing on Linux and macOS — see [`crate::platform::autostart`]) stays out of
+/// sight here.
 fn set_autostart(on: bool) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let exe = exe.display().to_string();
-        let mut cmd = std::process::Command::new("reg");
-        if on {
-            cmd.args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"]);
-            cmd.args(["/v", "SystemPing", "/t", "REG_SZ", "/d"]);
-            cmd.arg(format!("\"{exe}\""));
-            cmd.arg("/f");
-        } else {
-            cmd.args([
-                "delete",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "SystemPing",
-                "/f",
-            ]);
-        }
-        cmd.creation_flags(0x0800_0000);
-        cmd.status().map(|s| s.success()).unwrap_or(false)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = on;
-        false
-    }
+    crate::platform::autostart::set(on)
 }
 
-/// Whether the HKCU Run entry that starts the app at logon exists. This is the read side of
+/// Whether the autostart entry that starts the app at sign-in exists. This is the read side of
 /// `set_autostart`; without it the button in the top bar can only ever say "off", because the
 /// counter it reads is only ever written when the user presses it.
 fn autostart_exists() -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // `reg query` exits 0 only when the value is really there, so its status is the whole
-        // answer — no registry crate needed.
-        let mut cmd = std::process::Command::new("reg");
-        cmd.args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-            "/v",
-            "SystemPing",
-        ]);
-        cmd.creation_flags(0x0800_0000);
-        // The answer is not interesting, only whether the key was found.
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
-        cmd.status().map(|s| s.success()).unwrap_or(false)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    crate::platform::autostart::exists()
 }
