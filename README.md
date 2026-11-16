@@ -16,7 +16,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 8 Unit-Tests + 43 Integrationstests (ohne GUI)
+cargo test                   # 58 Tests (8 Unit- + 50 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -43,6 +43,7 @@ Ist `assets/icon.ico` neuer als die letzte Übersetzung, baut `build.rs` neu
 
 ```
 system-ping.exe                       Fenster öffnen
+system-ping.exe --help                Übersicht über alle Argumente (alias: -h)
 system-ping.exe --export-csv <datei>  gespeicherten Verlauf als CSV exportieren und beenden
 system-ping.exe --screenshot <datei.png> [ansicht]  ein Bild der Oberfläche rendern, wie es die Prüfung anfordert (alias: --shot)
 system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart|stats|events|settings|edit)
@@ -51,7 +52,9 @@ system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausg
 ```
 
 Das Bild kann auch ein anderes Zeitfenster zeigen, ohne die gespeicherten Einstellungen
-anzufassen: `--shot tagesbild.png 24h` (auch „12 h“, „30 min“, „90 s“).
+anzufassen: `--shot tagesbild.png 24h` (auch „12 h“, „30 min“, „90 s“). Ansicht und Fenster
+stehen direkt nach der Datei, also `--shot bild.png stats 6h --theme dunkel`; ein Optionswort
+wie `--theme` beendet die Ansichtsliste sonst — andernfalls landete das Bild auf dem Diagramm.
 
 Ziele werden über das Einstellungsfeld angelegt (Name + Host). Der Standard-Gateway wird
 beim ersten Start aus `ipconfig`/`route` geraten. Ein **Klick** auf ein Ziel in der
@@ -61,9 +64,15 @@ die Details des Ziels (Messwerte, ø, min/max, Verluste im sichtbaren Zeitfenste
 Klick auf dasselbe Ziel lässt den Editor samt Eingabe stehen; schließen tun nur Abbrechen,
 Escape, Speichern oder ein Klick auf eine andere Zeile — dabei wird vorher gespeichert.
 **Entfernen** gibt es im Editor links oben („entfernen“), also am Ziel, an dem man gerade
-arbeitet — nicht mehr oben rechts am markierten Eintrag. In den Einstellungen gibt es deshalb
-keine Ziel-Gruppe mehr; was dort übrig blieb (das Löschen des Verlaufs), heißt jetzt **„Messwerte
-löschen“** bei den Daten und betrifft ausdrücklich alle Ziele.
+arbeitet — nicht mehr oben rechts am markierten Eintrag.
+
+Ein Ziel anzulegen geht an zwei Stellen: oben in der Leiste und, für den Moment beim Lesen der
+Liste, in den Einstellungen unter **„Ziele“** — mit denselben beiden Feldern und Enter als
+Bestätigung. Daneben stehen drei Vorschlags-Knöpfe (Google DNS, Cloudflare, Quad9), die das Ziel
+nicht nur eintragen, sondern sofort mit dem Messen anfangen; sonst steht eine Zeile in der Liste,
+die niemand misst, und die erste Frage ist, warum das Diagramm leer bleibt. Was dort früher übrig
+blieb (das Löschen des Verlaufs), heißt jetzt **„Messwerte löschen“** bei den Daten und betrifft
+ausdrücklich alle Ziele.
 
 Jedes Ziel bekommt automatisch eine eigene Linienfarbe aus einer Palette von acht Farben
 (Blaugrün, Blau, Violett, Orange, Grün, Zyan, Rot, Gelb); im Diagramm, in der Legende, in der
@@ -73,6 +82,26 @@ Nummer der Palette gespeichert und überlebt einen Neustart; ein Ziel, das per H
 gibt seine Farbe für die automatischen frei. Sind mehr Ziele als Farben da, werden die Farben
 wieder verwendet. Die kleine Scheibe vor dem Namen bleibt davon unberührt — sie zeigt weiter den
 Zustand (grün/gelb/orange/rot).
+
+## Schrift: immer dasselbe Schwarz bzw. Weiß
+
+Alle Texte folgen einer einzigen Regel: im hellen Aussehen **schwarz**, im dunklen **weiß** — über
+Labels, Knöpfe, Überschriften, Eingabefelder, Achsenbeschriftung und das vom Maler gezeichnete
+Diagramm hinweg. egui bringt das anders mit (seine hellen Knöpfe sind grau 60, seine Labels grau 80,
+im dunklen Aussehen grau 140 und 180), deshalb schreibt `theme::apply` die eine Farbe in alle fünf
+Widget-Zustände; ein starker Text ist dadurch wirklich weiß bzw. schwarz und nicht nur heller grau.
+
+Was leiser aussehen soll — ausgeblendete Ziele, Achsen, Hinweistext — ist dasselbe Schwarz bzw.
+Weiß mit weniger Stärke, nie ein eigenes Grau. Nur zwei Dinge sind bewusst gefärbt: die Akzente
+(Ausfall rot, Warnung amber, gut grün, die Linienfarbe eines Ziels) und der markierte Text, der auf
+blauer Markierung die Gegenfarbe braucht. `app/tests/textcolor.rs` prüft die Regel.
+
+Eine egui-Eigenart ist dabei im Blick zu behalten: `RichText::weak()` setzt die Farbe **im Text
+selbst**, noch bevor das Widget malt — die vom Widget geholt Farbe füllt nur Löcher. Ein schwach
+geschriebenes auswählbares Label (die Ansichts-Knöpfe oben, die Kategorie-Chips) blieb deshalb grau,
+während der „▶ Alle starten“-Knopf daneben korrekt schwarz war. Deshalb tragen solche Knöpfe in
+`ui::view_text` keinen `weak()`: was aktiv ist, sagt der Auswahlhintergrund und nicht eine blassere
+Schrift.
 
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der
@@ -101,8 +130,11 @@ Kategorie) und die Kategorie muss an sein.
 * **Einzelne Ziele per Klick in der Legende.** Ein Klick auf den Namen eines Ziels in der Legende
   oben im Diagramm blendet genau dieses eine Ziel aus, ein zweiter holt es zurück. Ausgeblendete
   Ziele stehen weiterhin in der Legende — schwach geschrieben und mit einem hohlen Farbfleck statt
-  einer vollen Scheibe —, sonst gäbe es kein Zurück. Sie fehlen nur in der Statistik-Tabelle, die
-  keinen Schalter zum Zurückholen hat.
+  einer vollen Scheibe —, sonst gäbe es kein Zurück; der Knopf „◉“ am rechten Rand derselben Zeile
+  blendet dasselbe Ziel wieder ein. Sie fehlen in Diagramm, Statusliste und Statistik-Tabelle, und
+  die Gesamtzeile rechnet sie nicht mit.
+* **Nichts in der Auswahl** ist kein leerer Bildschirm: Das Diagramm sagt, woran es liegt (Textfilter,
+  alle Ziele ausgeblendet, Kategorie aus), die Statistik-Tabelle schreibt „Kein Ziel in der Auswahl“.
 
 ## Im Diagramm blättern und zoomen
 
@@ -115,16 +147,73 @@ werden:
   verlässt „Live“.
 * **Doppelklick ins Diagramm** geht zurück an das Ende: Fenster wird auf „Live“ gesetzt.
 
+## Tastatur
+
+Die Kürzel stehen auf den Ansichts-Knöpfen und sind in den Einstellungen unter „Tastatur“
+aufgezählt. Sie greifen nur, wenn kein Eingabefeld aktiv ist und keine Modifikator-Taste gehalten
+wird — sonst täten sie in einem Textfeld genau das Falsche.
+
+| Taste | Wirkung |
+| --- | --- |
+| `1` `2` `3` `4` | Diagramm · Statusliste · Statistiken · Einstellungen |
+| `Leertaste` | alle Ziele messen oder anhalten |
+| `←` / `→` | im Zeitfenster zurück / vor blättern (ein Viertel des Fensters) |
+| `Esc` | offenen Editor abbrechen, sonst zurück ins aktuelle Fenster („Live“) |
+| `Enter` | neues Ziel hinzufügen, solange ein Adressfeld den Fokus hat |
+| Mausrad | über dem Diagramm: Zeitfenster vergrößern / verkleinern |
+| Doppelklick | auf eine Störungszeile: Diagramm springt zu dieser Zeit |
+
+## Messen: Intervall und Zeitfenster
+
+Der Abstand zwischen zwei Prüfungen ist keine freie Zahl, sondern eine Stufe aus
+`0,25 · 0,5 · 1 · 2 · 5 · 10 s`. Oben in der Leiste sitzt die einzige Bedienung zur Laufzeit, in den
+Einstellungen steht derselbe Wert als lesbare Zeile — zwei Regler für eine Sache waren bisher nur
+eine Gelegenheit, sich zu widersprechen. Ein gespeicherter oder getippter Wert landet auf der
+nächstliegenden Stufe.
+
+Das Zeitfenster des Diagramms ist eine Voreinstellung (5 s bis 24 h), kein Schieberegler; der
+Log-Slider ist aus der Kopfzeile ausgezogen und sitzt jetzt als Preset-Liste bis 24 h dort, wo er
+hingehört.
+
+## Statistik-Tabelle
+
+* **Sortieren** durch Klick auf eine Spaltenüberschrift (↑/↓ zeigen die Richtung). Der erste Klick
+  sortiert absteigend — „die schlechtesten zuerst“ —, der zweite kehrt um. Sortiert wird nur die
+  Reihenfolge der Liste: jedes Ziel behält seine Id und damit seine Farbe.
+* **„Gesamt“-Zeile** zählt nur die Ziele zusammen, die gerade in der Auswahl sind (Textfilter,
+  Kategorie-Schalter, ausgeblendete Ziele). Median und p95 kommen dabei aus **allen Antworten
+  zusammen**, nicht als Mittelwert der Mediane — sonst steht in der Zeile eine Latenz, die kein
+  einziges Ziel gemessen hat. Ein Ziel ohne Antwort zieht das Minimum nicht auf 0; ganz ohne
+  Antwort heißt das Minimum „—“.
+* Die Tabelle ist waagerecht scrollbar, wenn nicht alle Spalten in die Breite passen.
+
 ## Diagramm über 24 Stunden
 
-Das Zeitfenster des Diagramms ist eine Voreinstellung, kein Schieberegler — von 15 s bis
-**24 h** (oben in der Leiste und in den Einstellungen). Ab zwei Stunden werden die Achsen mit
-der Uhrzeit beschriftet, sonst mit Minuten und Sekunden.
+Ab zwei Stunden werden die Achsen mit der Uhrzeit beschriftet, sonst mit Minuten und Sekunden.
 
 Damit ein Tag kein Loch im Diagramm ist, wächst die Zahl der Messwerte, die ein Ziel behält,
 automatisch mit dem Fenster: „Max. Messwerte je Ziel“ steht deshalb auf **auto** (0). Bei 24 h
 und einer Sekunde Abstand sind das rund 260 000 Werte pro Ziel (etwa 4 MiB); wer eine Zahl
-einträgt, bekommt sie, alles unter 1 024 wird auf diese Untergrenze gehoben.
+einträgt, bekommt sie, alles unter 1 024 wird auf diese Untergrenze gehoben. Die Sparklines in der
+linken Liste schneiden bei der p95-Grenze ihrer eigenen Serie ab (mindestens 40 ms), sonst zieht ein
+einzelner Ausreißer jede andere Kurve zur Geraden.
+
+## Ereignisliste
+
+Jede Zeile trägt die Uhrzeit `[HH:MM:SS]` (dieselbe Rechnung wie im CSV-Export), oben steht die
+Zeile „N von M“ — gemerkt wird nur, was ins Protokoll passt, gezählt wird alles. Der Schalter
+**„nur Störungen“** blendet Wiederherstellungen und Meldungen aus; ein **Doppelklick** auf eine
+Störungszeile springt mit dem Diagramm auf diesen Zeitpunkt. Im Diagramm ist die Liste als
+Kompaktfassung unter der Kurve eingebettet, in der eigenen Ansicht füllt sie den ganzen Platz und
+beginnt beim ältesten Eintrag.
+
+## Statusleiste
+
+Der Zähler „gesichert vor N s“ sagt, wann die Zustandsdatei zuletzt geschrieben wurde (Autosave
+läuft alle 8 s); ein eigener „Speichern“-Knopf wäre ein dritter Weg für etwas, das ohnehin
+automatisch passiert. `Laufzeit` rechnet ab einer Stunde in `H:MM:SS` um. Der Knopf **„CSV“**
+exportiert sofort in den Zustandsordner und öffnet ihn, **„⌂ Daten“** in der Kopfzeile tut nichts
+anderes als das Ordnerfenster zeigen.
 
 ## Zustand und Dateien
 
@@ -139,13 +228,15 @@ einträgt, bekommt sie, alles unter 1 024 wird auf diese Untergrenze gehoben.
   Standardgröße 1080×700. Ein `--shot` ändert die gespeicherte Lage nicht.
 * CSV-Export: `timestamp,target,latency_ms,status` mit lokalen ISO-8601-Stempeln. „CSV exportieren“
   schreibt in den Zustandsordner, „Speichern unter…“ fragt vorher nach einem Ziel; beides läuft im
-  Hintergrund, damit das Fenster beim Antworten nicht stehenbleibt. Eine optionale Protokoll-Datei
+  Hintergrund, damit das Fenster beim Antworten nicht stehenbleibt. Die Statusleiste nennt die Datei,
+  auf die man wartet, und später ihr Ergebnis. Eine optionale Protokoll-Datei
   schreibt jeden Messwert sofort fortlaufend mit.
 
 ## Was noch fehlt
 
-Drei Optionen in den Einstellungen sind gespeichert, aber nicht umgesetzt und deshalb
-abgeschaltet: Ton bei Ausfall/Wiederherstellung, Symbol im Infobereich, minimiert starten.
+Drei Felder sind in der Zustandsdatei gespeichert, aber bewusst ohne Knopf, weil dahinter nichts
+steht: Ton bei Ausfall/Wiederherstellung, Symbol im Infobereich, minimiert starten. Die Werte bleiben
+erhalten, falls eine der Funktionen später kommt.
 
 ## Ordner
 

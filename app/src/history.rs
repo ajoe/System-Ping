@@ -52,7 +52,7 @@ pub fn is_ok(rtt: f32) -> bool {
 }
 
 /// The value at fraction `f` of a sorted list (nearest-rank, no interpolation).
-fn pick(sorted: &[f32], f: f64) -> f32 {
+pub fn pick(sorted: &[f32], f: f64) -> f32 {
     let idx = ((sorted.len() as f64 - 1.0) * f).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
 }

@@ -1,6 +1,6 @@
 //! The whole interface: top bar, target list, the four views, event log, status bar.
 
-use crate::app::{self, App, TargetKind, View};
+use crate::app::{self, App, LogKind, TargetKind, View};
 use crate::history;
 use crate::store;
 use crate::theme::{self, Mode};
@@ -12,6 +12,31 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     left(ctx, app);
     bottom(ctx, app);
     center(ctx, app);
+}
+
+/// Dasselbe Spiel für die beiden Zielfelder in der Einstellungen-Gruppe „Ziele“: eigene Salts, weil
+/// das Adressfeld sonst mit dem oben in der Leiste denselben Zustand teilte — inklusive Fokus.
+const SETTINGS_HOST_ID_SALT: &str = "settings_host_field";
+const SETTINGS_LABEL_ID_SALT: &str = "settings_label_field";
+
+/// Text for a selectable control (the four view buttons, the category chips, „nur Störungen“, the
+/// colour scheme). `.weak()` would be the natural way to make these look like quiet controls, and it
+/// used to be written on every one of them — but egui resolves `weak` *before* painting: the galley
+/// already carries the faded colour, and the widget's own text colour (black / white, see
+/// [`crate::theme::apply`]) can only fill in where no colour was chosen. So a weak selectable label
+/// stayed grey next to a button whose label is properly black or white — which is exactly what this
+/// app must not do. Hence: plain text here, and the selection background plus the frame say what is
+/// active instead of a faded colour.
+///
+/// The shortcut is appended with two spaces so it reads as a separate hint; pass an empty string for
+/// controls that have no key.
+fn selectable_text(label: impl Into<String>, shortcut: &str) -> RichText {
+    let text = if shortcut.is_empty() {
+        label.into()
+    } else {
+        format!("{}  {}", label.into(), shortcut)
+    };
+    RichText::new(text)
 }
 
 /// The two new-target fields in the top bar have to be found by id, because „Enter adds a target“
@@ -63,13 +88,23 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                         if app.follow_live { "● Live" } else { "○ Live" },
                     ))
                     .on_hover_text(
-                        "Dem aktuellen Zeitfenster folgen — aus, wenn im Diagramm zurückgeblättert wird",
+                        "Dem aktuellen Zeitfenster folgen — aus, wenn im Diagramm zurückgeblättert \
+                         wird; Doppelklick ins Diagramm oder Esc schaltet es wieder ein",
                     )
                     .clicked()
                 {
                     app.follow_live = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Der Weg zum Zustandsordner gehört dorthin, wo die Datei entsteht: wer wissen
+                    // will, was gespeichert ist, hat gerade auf den Titel geschaut.
+                    if ui
+                        .small_button("⌂ Daten")
+                        .on_hover_text("Zustandsordner im Explorer öffnen (Datei, Protokoll, Exporte)")
+                        .clicked()
+                    {
+                        app.open_state_folder();
+                    }
                     // Der Autostart-Knopf ist nur sichtbar, solange nicht gemessen wird.
                     // `autostart_state()` is the registry's answer (looked up at startup, then kept
                     // current); the raw counter alone would be „aus“ until the user presses this.
@@ -150,22 +185,34 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 // Only the interval lives here. The chart window has its preset picker in the row
                 // above, and a second control for the same setting — worse still one that stopped
                 // at 15 min while the picker offers 24 h — was more confusing than useful.
-                if ui
-                    .add(
-                        egui::Slider::new(&mut app.options.interval_secs, 0.25..=10.0)
-                            .suffix(" s")
-                            .text("Intervall"),
-                    )
-                    .changed()
-                {
+                //
+                // A stepped combo box rather than a slider: the useful distances are six rungs
+                // (0,25 … 10 s), and a slider makes 0,7 s look as deliberate as 1 s while it only
+                // changes how often `ping.exe` starts. The value is read out next to it so the
+                // number stays legible without opening the list.
+                let before = app.options.interval_secs;
+                egui::ComboBox::from_id_salt("interval_top")
+                    .selected_text(app::interval_label(before))
+                    .width(72.0)
+                    .show_ui(ui, |ui| {
+                        for c in app::INTERVAL_CHOICES {
+                            ui.selectable_value(&mut app.options.interval_secs, *c, app::interval_label(*c));
+                        }
+                    })
+                    .response
+                    .on_hover_text(app::interval_hint(before));
+                if (app.options.interval_secs - before).abs() > f32::EPSILON {
                     save_now = true;
                 }
                 ui.separator();
-                // Views first: they decide what the rest of the window shows.
+                // Views first: they decide what the rest of the window shows. Die Ziffer dahinter ist
+                // kein Schmuck, sondern das Kürzel (`View::shortcut`) — und die Ansicht nennt es jetzt
+                // selbst, damit Knopf, Tastatur und Einstellungen nicht drei verschiedene Listen
+                // pflegen.
                 for view in [View::Chart, View::Events, View::Stats, View::Settings] {
                     let sel = app.view == view;
                     if ui
-                        .selectable_label(sel, RichText::new(view.label()).weak())
+                        .selectable_label(sel, selectable_text(view.label(), view.shortcut()))
                         .on_hover_text(view.hint())
                         .clicked()
                     {
@@ -189,7 +236,19 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                         continue;
                     }
                     let on = !app.options.kinds_off.contains(&app::kind_index(k));
-                    let mut chip = ui.selectable_label(on, RichText::new(k.label()).weak());
+                    // Das Wort „aus“ am Chip: ohne es sieht ein ausgeblendeter Schalter aus wie ein
+                    // Knopf, der nicht reagiert. So steht an der Stelle, was Sache ist.
+                    let mut chip = ui.selectable_label(
+                        on,
+                        selectable_text(
+                            if on {
+                                k.label().to_string()
+                            } else {
+                                format!("{} aus", k.label())
+                            },
+                            "",
+                        ),
+                    );
                     if !on {
                         chip = chip.on_hover_text(format!(
                             "{k} wieder einblenden — im Moment ist die ganze Kategorie verborgen",
@@ -244,6 +303,71 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
         });
     if save_now {
         app.save_now();
+    }
+    short_cuts(ctx, app);
+}
+
+/// The keyboard: view numbers, start/stop, pan, escape. Drawn after the top bar so it sees the same
+/// frame's input as the panels that follow.
+///
+/// Two guards keep the keys from doing damage. A focused widget (a text field, a combo box) has to
+/// keep its keystrokes — `1` in the address field must not jump to the chart. And every shortcut
+/// demands unmodified keys: with Ctrl or Alt held, `1` is somebody else's command.
+///
+/// The window keys are read from the context rather than a panel's `Ui` because they belong to no
+/// widget at all; that also means a key press is acted on once per frame, which is what holding a
+/// key should *not* do (see the repeat guard).
+fn short_cuts(ctx: &egui::Context, app: &mut App) {
+    // Held down by a text field or an open combo box's search? Then the keys are typing.
+    let busy = ctx.memory(|mem| mem.focused().is_some());
+    if busy {
+        return;
+    }
+    let horizon = app.options.horizon_secs as f64;
+    let mut quit_edit = false;
+    ctx.input(|i| {
+        if !i.modifiers.is_none() {
+            return;
+        }
+        for (key, view) in [
+            (egui::Key::Num1, View::Chart),
+            (egui::Key::Num2, View::Events),
+            (egui::Key::Num3, View::Stats),
+            (egui::Key::Num4, View::Settings),
+        ] {
+            if i.key_pressed(key) {
+                app.view = view;
+            }
+        }
+        if i.key_pressed(egui::Key::Space) {
+            if app.running {
+                app.stop();
+            } else {
+                app.start();
+            }
+        }
+        // A quarter of the window per press — the same step as the two pan buttons, so the key and
+        // the button mean the same distance.
+        if i.key_pressed(egui::Key::ArrowLeft) {
+            app.follow_live = false;
+            app.pan_offset_secs += horizon * 0.25;
+        }
+        if i.key_pressed(egui::Key::ArrowRight) {
+            app.pan_offset_secs = (app.pan_offset_secs - horizon * 0.25).max(0.0);
+            if app.pan_offset_secs < 0.5 {
+                app.follow_live = true;
+            }
+        }
+        if i.key_pressed(egui::Key::Escape) {
+            quit_edit = app.edit_idx.is_some();
+        }
+    });
+    // Esc first cancels an open editor; only without one does it mean „back to the live edge“.
+    if quit_edit {
+        app.cancel_edit();
+    } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.follow_live = true;
+        app.pan_offset_secs = 0.0;
     }
 }
 
@@ -723,17 +847,60 @@ pub fn bottom(ctx: &egui::Context, app: &mut App) {
                 ui.label(
                     RichText::new(format!("Verluste: {}", lost)).color(m.loss_count(lost > 0)),
                 );
-                ui.label(format!("Ereignisse: {}", app.alert_count));
+                // Gezählt wird alles, gemerkt nur, was ins Protokoll passt — die beiden Zahlen sind
+                // selten gleich, und eine allein wäre leicht als „so viel ist passiert“ gelesen.
+                if app.log_total > app.log.len() {
+                    ui.label(format!(
+                        "Ereignisse: {} von {}",
+                        app.log.len(),
+                        app.log_total
+                    ));
+                } else {
+                    ui.label(format!("Ereignisse: {}", app.log.len()));
+                }
                 ui.separator();
                 ui.label(RichText::new(&app.status_msg).weak().italics());
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // A8: ab einer Stunde wäre „65:00“ eine Zahl, die man erst umrechnen muss.
                     let secs = app.engine.elapsed_secs() as i64;
+                    let uptime = if secs >= 3_600 {
+                        format!(
+                            "{}:{:02}:{:02}",
+                            secs / 3_600,
+                            (secs % 3_600) / 60,
+                            secs % 60
+                        )
+                    } else {
+                        format!("{:02}:{:02}", secs / 60, secs % 60)
+                    };
                     ui.label(
-                        RichText::new(format!("Laufzeit {:02}:{:02}", secs / 60, secs % 60))
+                        RichText::new(format!("Laufzeit {uptime}"))
                             .monospace()
                             .weak(),
                     );
+                    ui.separator();
+                    // A2: die Zustandsdatei schreibt alle 8 s von selbst, ein „Speichern“-Knopf wäre
+                    // ein dritter Weg für dieselbe Sache. Was fehlt, ist die Rückmeldung — also steht
+                    // hier, wann zuletzt gesichert wurde.
+                    let age = app.save_age_secs();
+                    let saved = if age < 0.0 {
+                        "noch nicht gesichert".to_string()
+                    } else if age < 20.0 {
+                        format!("gesichert vor {} s", age as i64)
+                    } else {
+                        format!("zuletzt vor {} min", age as i64 / 60)
+                    };
+                    ui.label(RichText::new(saved).weak().size(11.5));
+                    if ui
+                        .small_button("CSV")
+                        .on_hover_text(
+                            "Messwerte sofort in den Zustandsordner schreiben und ihn öffnen",
+                        )
+                        .clicked()
+                    {
+                        app.quick_export();
+                    }
                 });
             });
         });
@@ -929,6 +1096,29 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 
     let t_min = t_max - horizon;
 
+    // B5: Ein leeres Diagramm ist eine Antwort ohne Frage. Ohne Ziel auf dem Bildschirm sagt die
+    // Fläche deshalb, *warum* sie leer ist — Filter, Kategorie oder ausgeblendete Ziele sind drei
+    // verschiedene Knöpfe, an denen man drehen kann.
+    let shown_count = app.targets.iter().filter(|t| is_shown(app, t)).count();
+    if shown_count == 0 && !app.targets.is_empty() {
+        let why = if !app.all_kinds_on() {
+            "Alle Kategorien sind über die Schalter oben ausgeblendet."
+        } else if app.targets.iter().all(|t| t.hidden) {
+            "Alle Ziele sind ausgeblendet — klicke ihren Namen in der Legende an, um sie \
+             zurückzuholen."
+        } else {
+            "Kein Ziel passt zum Textfilter oben rechts — mit ✕ oder einem leeren Feld geht es \
+             weiter."
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            why,
+            FontId::proportional(13.0),
+            m.text_dim(),
+        );
+    }
+
     // The p95 line sits at the 95th percentile of the replies inside the visible window, so
     // it follows the trace instead of being pushed off by one long spike. The scan goes into
     // a scratch buffer on the app, which keeps this allocation-free per frame.
@@ -990,6 +1180,26 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     }
     let scale_top = (y_p95 * 1.15).max(40.0);
 
+    // C4: Welche Messwerte als Ausreißer gelten, hängt an der ganzen Serie des Ziels und ändert
+    // sich nur, wenn ein neuer Wert dazukommt. Die Kurven, die Ringe und die Hover-Anzeige brauchen
+    // denselben Schnitt — also wird er hier einmal pro Frame und Ziel berechnet und in
+    // `cut_scratch` abgelegt (indiziert nach Ziel-Id, damit die Auswertung nicht umsortiert werden
+    // muss). Ein ausgeblendetes Ziel bekommt `f64::MAX`: es hat nichts zu markieren.
+    {
+        // Index statt Iterator: `is_shown` braucht `app` unverändert, deshalb darf der Vektor nicht
+        // gleichzeitig als mutable Anleihe gehalten werden. Der Schnitt kommt in eine lokale Liste
+        // und wird danach umgehängt.
+        let mut cuts = Vec::with_capacity(app.targets.len());
+        for t in &app.targets {
+            cuts.push(if is_shown(app, t) {
+                history::outlier_cut(t.series.samples()).0
+            } else {
+                f64::MAX
+            });
+        }
+        app.cut_scratch = cuts;
+    }
+
     let bands = [30.0f32, 80.0, 150.0, 300.0];
     for b in bands {
         if b >= scale_top {
@@ -1046,7 +1256,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         let line = app.trace_color(t);
         let width = if sel { 2.0_f32 } else { 1.5_f32 };
         // Outliers get a ring on the time axis, at the same cut the statistics use.
-        let (cut, _n) = history::outlier_cut(t.series.samples());
+        let cut = app.cut_scratch.get(t.id).copied().unwrap_or(f64::MAX);
         let mut prev: Option<(f32, f32)> = None;
         // The window is half-open like everywhere else in the chart: a sample that
         // starts a new window belongs to that one, so it must not be drawn twice.
@@ -1124,7 +1334,9 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                     continue;
                 }
                 if let Some(s) = nearest(t, t_at) {
-                    let outlier = (s.rtt_ms as f64) > history::outlier_cut(t.series.samples()).0;
+                    // C4: die Ausreißer-Grenze wird pro Frame und Ziel genau einmal berechnet (siehe
+                    // der Schnitt vor den Kurven) und hier nur noch gelesen.
+                    let cut = app.cut_scratch.get(t.id).copied().unwrap_or(f64::MAX);
                     rows.push((
                         format!(
                             "{}  {}{}",
@@ -1134,7 +1346,11 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                             } else {
                                 "Timeout".into()
                             },
-                            if outlier { "  <- Ausr." } else { "" }
+                            if (s.rtt_ms as f64) > cut {
+                                "  <- Ausr."
+                            } else {
+                                ""
+                            },
                         ),
                         app.trace_color(t),
                     ));
@@ -1178,31 +1394,79 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 
     // Event log under the chart.
     ui.add_space(6.0);
+    event_log(ui, app, 120.0);
+}
+
+/// The outage/recovery log, in both places it appears: as a compact strip under the chart and as
+/// the full list in its own view. One function so the two cannot drift apart in what they show.
+///
+/// `max_height` is the strip's height; pass [`f32::MAX`] to let the list fill whatever is left. That
+/// choice also decides the scroll behaviour: a strip sticks to the newest entry (that is what a
+/// status line is for), while the full view starts at the oldest and keeps the position of whoever
+/// reads it — jumping to the bottom on every new event would make a long night unreadable.
+///
+/// Every row carries the wall clock rather than „+123 s“: the chart counts from program start, so
+/// two windows open at different times would disagree about when an outage happened. The same
+/// conversion as the CSV export is used, which makes a log line and a CSV line the same fact.
+fn event_log(ui: &mut Ui, app: &mut App, max_height: f32) {
+    let m = app.theme_mode;
     ui.horizontal(|ui| {
         ui.label(RichText::new("Ereignisse").strong());
-        ui.label(RichText::new(format!("({})", app.log.len())).weak());
+        // Gezählt wird alles, gemerkt nur, was ins Protokoll passt — sonst liest man die Länge der
+        // Liste als „so viel ist passiert“.
+        if app.log_total > app.log.len() {
+            ui.label(RichText::new(format!("{} von {}", app.log.len(), app.log_total)).weak());
+        } else {
+            ui.label(RichText::new(format!("({})", app.log.len())).weak());
+        }
+        // A7: nach einer langen Nacht will man die Störfälle sehen, nicht jede Meldung. Gefiltert
+        // wird nur die Ansicht — „leeren“ bliebe sonst der einzige Weg einzugrenzen.
+        let only_bad = app.log_only_outages;
+        let filt = ui
+            .selectable_label(only_bad, selectable_text("nur Störungen", ""))
+            .on_hover_text("Nur Ausfälle und Wiederherstellungen zeigen")
+            .clicked();
+        if filt {
+            app.log_only_outages = !only_bad;
+        }
         if ui.small_button("leeren").clicked() {
             app.log.clear();
             app.log_total = 0;
         }
     });
+    // Rows that can be jumped to, remembered by their position in the log so the click can be
+    // matched again after the list is drawn: `app` cannot be borrowed while it is being iterated.
+    let mut jump: Option<f64> = None;
     ScrollArea::vertical()
-        .max_height(120.0)
-        .stick_to_bottom(true)
+        .max_height(max_height)
+        .stick_to_bottom(max_height.is_finite())
         .show(ui, |ui| {
-            for e in &app.log {
+            for e in app.log.iter() {
+                if app.log_only_outages && e.kind == LogKind::Info {
+                    continue;
+                }
                 let color = m.log_kind(e.kind);
-                ui.add(
+                let wall = app.wall_clock(e.secs);
+                let row = ui.add(
                     Label::new(
-                        RichText::new(format!("[{:>8}] {}", fmt_clock(e.secs), e.text))
+                        RichText::new(format!("[{wall}] {}", e.text))
                             .color(color)
                             .monospace()
                             .size(11.5),
                     )
                     .selectable(false),
                 );
+                // A7: die Meldung und der Verlauf an einem Ort. Ein Doppelklick auf eine Störungs-
+                // zeile holt das Diagrammfenster auf diesen Zeitpunkt — sonst sitzt man in der Liste,
+                // liest „Ausfall um 03:12“ und muss erst suchen, wo das war.
+                if e.kind != LogKind::Info && row.double_clicked() {
+                    jump = Some(e.secs);
+                }
             }
         });
+    if let Some(secs) = jump {
+        app.jump_to_secs(secs);
+    }
 }
 
 /// Column widths for the statistics grid: Ziel, Host, Status, Min, Ø, Median,
@@ -1286,11 +1550,6 @@ pub fn fmt_axis(secs: f64, horizon: f64, clock: Option<i64>) -> String {
     }
 }
 
-fn fmt_clock(secs: f64) -> String {
-    let s = secs.max(0.0) as i64;
-    format!("{:02}:{:02}", s / 60, s % 60)
-}
-
 /* ------------------------------------------------------------------- list */
 
 fn events_view(ui: &mut Ui, app: &mut App) {
@@ -1298,29 +1557,29 @@ fn events_view(ui: &mut Ui, app: &mut App) {
     ui.label(RichText::new("Statusliste").strong());
     ui.add_space(4.0);
     let now = app.engine.elapsed_secs();
-    let horizon = app.options.horizon_secs as f64;
     // Taken out of the app so it can be reused while `app.targets` is borrowed.
     let mut scratch = std::mem::take(&mut app.stats_scratch);
+    // B3: geklickt werden kann nur, was schon gezeichnet ist — also die Id merken und nach der
+    // Schleife auflösen.
+    let mut unhide_id: Option<usize> = None;
+    // B5: auch hier ist „keine Zeile“ eine Antwort, die erklärt sein will.
+    if app.targets.iter().filter(|t| app.shown(t)).count() == 0 {
+        ui.label(RichText::new(weak_note(app)));
+    }
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for idx in 0..app.targets.len() {
-                // The status list follows the same filters as the chart; a target hidden from the
-                // plot is hidden here too.
-                if !app.shown(&app.targets[idx]) {
+                // A1/B2: was im Diagramm nicht zu sehen ist, fehlt auch hier nicht — es wird
+                // schwächer geschrieben und bleibt so als Beweis des Ausblendens stehen.
+                let shown = app.shown(&app.targets[idx]);
+                if !shown && !app.targets[idx].hidden {
                     continue;
                 }
                 let color = app.status_color(&app.targets[idx]);
                 let trace = app.trace_color(&app.targets[idx]);
                 let txt = app.status_text(&app.targets[idx]);
-                let st = app.targets[idx].series.stats_window(
-                    app.targets[idx]
-                        .series
-                        .last()
-                        .map_or(0.0, |s| s.t_secs - horizon),
-                    f64::MAX,
-                    &mut scratch,
-                );
+                let st = app.stats_for(&app.targets[idx], &mut scratch);
                 let t = &app.targets[idx];
                 let sel = app.selected == idx;
                 let secs_ago = if t.last_probe_secs > 0.0 {
@@ -1335,6 +1594,16 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                     .inner_margin(egui::Margin::symmetric(10, 8));
                 let r = frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        // B3: wer ausgeblendet ist, kann hier ebenso zurückgeholt werden wie über
+                        // die Legende — der Aufwärts-Punkt neben dem Namen tut es.
+                        if app.targets[idx].hidden
+                            && ui
+                                .small_button(RichText::new("◉").color(m.text_dim()))
+                                .on_hover_text("Ziel wieder anzeigen")
+                                .clicked()
+                        {
+                            unhide_id = Some(app.targets[idx].id);
+                        }
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 6.0, color);
@@ -1344,10 +1613,22 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                         ui.painter().rect_filled(line_rect.shrink(5.0), 2.0, trace);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
+                            // B2: derselbe Name, dieselbe Stelle — nur deutlich leiser als alles,
+                            // was gerade gemessen wird. Der Grund steht daneben, nicht im Tooltip.
+                            let mut name = format!("{}   ({})", t.label, t.host);
+                            if !shown {
+                                name.push_str(if t.hidden {
+                                    "  · ausgeblendet"
+                                } else {
+                                    "  · gefiltert"
+                                });
+                            }
                             ui.add(
-                                Label::new(
-                                    RichText::new(format!("{}   ({})", t.label, t.host)).strong(),
-                                )
+                                Label::new(RichText::new(name).strong().color(if shown {
+                                    m.text()
+                                } else {
+                                    m.text_dim()
+                                }))
                                 .selectable(false),
                             );
                             let age = if secs_ago < 0.0 {
@@ -1407,6 +1688,21 @@ fn events_view(ui: &mut Ui, app: &mut App) {
             }
         });
     app.stats_scratch = scratch;
+    if let Some(id) = unhide_id {
+        app.toggle_hidden_by_id(id);
+    }
+}
+
+/// Why nothing is shown, in one sentence — the same three causes in every view that can go empty.
+fn weak_note(app: &App) -> String {
+    if !app.all_kinds_on() {
+        "Alle Kategorien sind über die Schalter oben ausgeblendet.".to_string()
+    } else if app.targets.iter().all(|t| t.hidden) {
+        "Alle Ziele sind ausgeblendet — in der Legende des Diagramms holen sie ihre Namen zurück."
+            .to_string()
+    } else {
+        "Kein Ziel passt zum Textfilter oben rechts.".to_string()
+    }
 }
 
 fn draw_sparkline(ui: &Ui, series: &history::Series, rect: egui::Rect, color: Color32) {
@@ -1417,16 +1713,17 @@ fn draw_sparkline(ui: &Ui, series: &history::Series, rect: egui::Rect, color: Co
     }
     let t0 = samples[0].t_secs;
     let t1 = samples.last().map(|s| s.t_secs).unwrap_or(t0 + 1.0);
+    // C2: eine Sparkline ist 16 px hoch und sagt nur „ruhig“ oder „bewegt sich das“. Ein einzelner
+    // Ausreißer von 900 ms drückt alles andere auf eine gerade Linie — deshalb endet die Achse beim
+    // p95 der Serie, mindestens aber bei 40 ms. Was darüber liegt, bleibt als Ring sichtbar.
+    let (cut, _n) = history::outlier_cut(samples);
     let mut y_max = 40.0f32;
     for s in samples {
-        if history::is_ok(s.rtt_ms) {
+        if history::is_ok(s.rtt_ms) && (s.rtt_ms as f64) <= cut {
             y_max = y_max.max(s.rtt_ms);
         }
     }
     let painter = ui.painter();
-    // Which samples count as outliers is decided over the whole stored series, so
-    // the marks match what the statistics list as an outlier.
-    let (cut, _n) = history::outlier_cut(samples);
 
     let mut prev: Option<(f32, f32)> = None;
     for s in samples {
@@ -1461,6 +1758,23 @@ fn draw_sparkline(ui: &Ui, series: &history::Series, rect: egui::Rect, color: Co
 
 /* ------------------------------------------------------------------ stats */
 
+/// Which statistics column a header click sorts by. `pub` and named after the table's own columns so
+/// the header, the arrow and [`App::sort_targets`] cannot disagree about what „p95“ means.
+fn sort_column(n: usize) -> Option<app::SortColumn> {
+    Some(match n {
+        0 => app::SortColumn::Label,
+        1 => app::SortColumn::Host,
+        3 => app::SortColumn::Min,
+        4 => app::SortColumn::Avg,
+        5 => app::SortColumn::Median,
+        6 => app::SortColumn::P95,
+        7 => app::SortColumn::Max,
+        8 => app::SortColumn::Loss,
+        9 => app::SortColumn::Outliers,
+        _ => return None,
+    })
+}
+
 fn stats_view(ui: &mut Ui, app: &mut App) {
     let m = app.theme_mode;
     ui.label(RichText::new("Statistiken").strong());
@@ -1470,151 +1784,223 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
     // targets are left out here: unlike the legend, a statistics table has no way to switch them
     // back on.
     let ids: Vec<usize> = app.shown_target_ids();
-    let horizon = app.options.horizon_secs as f64;
     // Taken out of the app so it can be reused while `app.targets` is borrowed.
     let mut scratch = std::mem::take(&mut app.stats_scratch);
     let mut select: Option<usize> = None;
 
     // Plain grid instead of egui_extras' table: the look stays the same (header row,
     // one row per target) without pulling in another crate.
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
-        for c in [
-            "Ziel", "Host", "Status", "Min", "Ø", "Median", "p95", "Max", "Verlust", "Ausr.",
-        ] {
-            ui.add_sized(
-                [110.0, 20.0],
-                Label::new(RichText::new(c).strong().size(12.0)).selectable(false),
-            );
-        }
-    });
-    ui.separator();
-    ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for &idx in &ids {
-                let t = &app.targets[idx];
-                let st = t.series.stats_window(
-                    t.series.last().map_or(0.0, |s| s.t_secs - horizon),
-                    f64::MAX,
-                    &mut scratch,
-                );
-                let color = app.status_color(t);
-                let trace = app.trace_color(t);
-                let txt = app.status_text(t);
-                let sel = app.selected == idx;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    let widths = column_widths();
-                    // Farbstrich vor dem Namen: dieselbe Farbe wie die Linie im Diagramm.
-                    let (line_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(14.0, 20.0), egui::Sense::hover());
-                    ui.painter().rect_filled(line_rect.shrink(6.0), 1.5, trace);
-                    if ui
-                        .add_sized(
-                            [widths[0], 20.0],
-                            Label::new(RichText::new(&t.label).strong()).selectable(sel),
-                        )
-                        .clicked()
-                    {
-                        select = Some(idx);
+    //
+    // B4/C6: every column header is a button. The first click sorts descending — „die schlechtesten
+    // zuerst“, because that is what one looks for in a latency table — and the second reverses it.
+    // The arrow is painted next to the word rather than replacing it, so an unsorted table still
+    // says what each column would do.
+    let mut sort_click: Option<(app::SortColumn, bool)> = None;
+    let widths = column_widths();
+    ScrollArea::horizontal().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (n, c) in [
+                "Ziel", "Host", "Status", "Min", "Ø", "Median", "p95", "Max", "Verlust", "Ausr.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let col = sort_column(n);
+                let arrow = match (&app.sort, col) {
+                    (Some(s), Some(col)) if s.column == col => {
+                        if s.descending {
+                            " ↓"
+                        } else {
+                            " ↑"
+                        }
                     }
-                    ui.add_sized(
-                        [widths[1], 20.0],
-                        Label::new(RichText::new(&t.host).monospace().size(12.0)).selectable(false),
-                    );
-                    ui.add_sized(
-                        [widths[2], 20.0],
-                        Label::new(RichText::new(&txt).color(color).size(12.0)).selectable(false),
-                    );
-                    for (i, v) in [st.min, st.avg as f32, st.median, st.p95, st.max]
-                        .iter()
-                        .enumerate()
-                    {
+                    _ => "",
+                };
+                let btn = ui.add_sized(
+                    [widths[n], 20.0],
+                    Label::new(RichText::new(format!("{c}{arrow}")).strong().size(12.0))
+                        .selectable(false),
+                );
+                if let Some(col) = col {
+                    btn.clone().on_hover_text(format!(
+                        "Nach {c} sortieren — nochmaliger Klick kehrt die Richtung um"
+                    ));
+                    if btn.clicked() {
+                        let descending = match &app.sort {
+                            Some(s) if s.column == col => !s.descending,
+                            _ => true,
+                        };
+                        sort_click = Some((col, descending));
+                    }
+                }
+            }
+        });
+        ui.separator();
+        if ids.is_empty() {
+            // B5: a table of nothing says why.
+            ui.label(RichText::new(weak_note(app)).size(12.5));
+        }
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for &idx in &ids {
+                    let t = &app.targets[idx];
+                    // C3: dieselbe Rechnung wie links in der Liste und unten in der Gesamt-Zeile.
+                    let st = app.stats_for(t, &mut scratch);
+                    let color = app.status_color(t);
+                    let trace = app.trace_color(t);
+                    let txt = app.status_text(t);
+                    let sel = app.selected == idx;
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        // Farbstrich vor dem Namen: dieselbe Farbe wie die Linie im Diagramm.
+                        let (line_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(14.0, 20.0), egui::Sense::hover());
+                        ui.painter().rect_filled(line_rect.shrink(6.0), 1.5, trace);
+                        if ui
+                            .add_sized(
+                                [widths[0], 20.0],
+                                Label::new(RichText::new(&t.label).strong()).selectable(sel),
+                            )
+                            .clicked()
+                        {
+                            select = Some(idx);
+                        }
                         ui.add_sized(
-                            [widths[3 + i], 20.0],
+                            [widths[1], 20.0],
+                            Label::new(RichText::new(&t.host).monospace().size(12.0))
+                                .selectable(false),
+                        );
+                        ui.add_sized(
+                            [widths[2], 20.0],
+                            Label::new(RichText::new(&txt).color(color).size(12.0))
+                                .selectable(false),
+                        );
+                        for (i, v) in [st.min, st.avg as f32, st.median, st.p95, st.max]
+                            .iter()
+                            .enumerate()
+                        {
+                            ui.add_sized(
+                                [widths[3 + i], 20.0],
+                                Label::new(
+                                    RichText::new(crate::app::fmt_ms(*v)).monospace().size(12.0),
+                                )
+                                .selectable(false),
+                            );
+                        }
+                        let cl = m.loss_text(st.loss_pct > 0.5);
+                        ui.add_sized(
+                            [widths[8], 20.0],
                             Label::new(
-                                RichText::new(crate::app::fmt_ms(*v)).monospace().size(12.0),
+                                RichText::new(format!("{:.1} %", st.loss_pct))
+                                    .color(cl)
+                                    .monospace()
+                                    .size(12.0),
                             )
                             .selectable(false),
                         );
-                    }
-                    let cl = m.loss_text(st.loss_pct > 0.5);
-                    ui.add_sized(
-                        [widths[8], 20.0],
-                        Label::new(
-                            RichText::new(format!("{:.1} %", st.loss_pct))
-                                .color(cl)
-                                .monospace()
-                                .size(12.0),
-                        )
-                        .selectable(false),
-                    );
-                    // Outliers are counted over the whole stored series, so this number
-                    // does not change when only part of it is on screen.
-                    let c = m.warn_count(st.outliers > 0);
-                    ui.add_sized(
-                        [widths[9], 20.0],
-                        Label::new(
-                            RichText::new(st.outliers.to_string())
-                                .color(c)
-                                .monospace()
-                                .size(12.0),
-                        )
-                        .selectable(false),
-                    );
-                });
-            }
-        });
+                        // Outliers are counted over the whole stored series, so this number
+                        // does not change when only part of it is on screen.
+                        let c = m.warn_count(st.outliers > 0);
+                        ui.add_sized(
+                            [widths[9], 20.0],
+                            Label::new(
+                                RichText::new(st.outliers.to_string())
+                                    .color(c)
+                                    .monospace()
+                                    .size(12.0),
+                            )
+                            .selectable(false),
+                        );
+                    });
+                }
+            });
+    });
     app.stats_scratch = scratch;
 
     if let Some(idx) = select {
         app.selected = idx;
     }
+    // B4: the sort happens after the table is drawn — `sort_targets` needs `app` mutably and reorders
+    // the very list being iterated. The header arrow updates on the next pass, which is what a click
+    // on a column reads as anyway.
+    if let Some((column, descending)) = sort_click {
+        app.sort = Some(app::SortState { column, descending });
+        app.sort_targets(column, descending);
+    }
 
     ui.add_space(10.0);
     ui.separator();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Gesamt").strong());
-        let mut total = 0usize;
-        let mut replies = 0usize;
-        let mut sum = 0f64;
-        let mut max = 0f32;
-        let mut outliers = 0usize;
-        // Taken out of the app so it can be reused while `app.targets` is borrowed.
-        let mut scratch = std::mem::take(&mut app.stats_scratch);
-        for t in &app.targets {
-            // Same targets as the table above, so "Gesamt" adds up exactly the rows shown.
-            if !app.shown(t) {
-                continue;
-            }
-            let s = t.series.stats_window(
-                t.series.last().map_or(0.0, |s| s.t_secs - horizon),
-                f64::MAX,
-                &mut scratch,
-            );
-            total += s.total;
-            replies += s.replies;
-            sum += s.sum;
-            max = max.max(s.max);
-            outliers += s.outliers;
+    // D4: „Gesamt“ ist keine Summe der Zeilen, sondern dieselbe Rechnung wie pro Ziel — nur über
+    // alle Antworten der Auswahl hinweg. Median und p95 zweier Ziele zu mitteln ergäbe eine Latenz,
+    // die kein Ziel gemessen hat; also sammelt `stats_total` alle Antworten in einen Puffer und zieht
+    // die Perzentile daraus.
+    let mut all = std::mem::take(&mut app.all_rtt_scratch);
+    let mut scratch = std::mem::take(&mut app.stats_scratch);
+    let st = app.stats_total(&mut scratch, &mut all);
+    app.stats_scratch = scratch;
+    app.all_rtt_scratch = all;
+    // Eine Spalte ohne Messwert ist „—“ und nicht 0: ein Ziel, das nie geantwortet hat, hat keine
+    // Latenz, und eine Null in einer Latenzspalte wäre eine Aussage, die nicht stimmt.
+    let num = |v: f32| {
+        if v.is_finite() && st.replies > 0 {
+            crate::app::fmt_ms(v)
+        } else {
+            "—".to_string()
         }
-        let avg = if replies > 0 {
-            sum / replies as f64
-        } else {
-            0.0
-        };
-        let loss = if total > 0 {
-            100.0 * (total - replies) as f64 / total as f64
-        } else {
-            0.0
-        };
-        ui.label(format!("{} Prüfungen", total));
-        ui.label(format!("Ø {}", crate::app::fmt_ms(avg as f32)));
-        ui.label(format!("max {}", crate::app::fmt_ms(max)));
-        ui.label(format!("Verlust {:.1} %", loss));
-        ui.label(format!("{} Auffälligkeiten", outliers));
-        app.stats_scratch = scratch;
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let widths = column_widths();
+        ui.add_sized(
+            [widths[0] + widths[1] + widths[2], 20.0],
+            Label::new(
+                RichText::new(format!("Gesamt · {} Prüfungen", st.total))
+                    .strong()
+                    .size(12.0),
+            )
+            .selectable(false),
+        );
+        for (n, v) in [
+            num(st.min),
+            if st.replies > 0 {
+                crate::app::fmt_ms(st.avg as f32)
+            } else {
+                "—".to_string()
+            },
+            num(st.median),
+            num(st.p95),
+            num(st.max),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ui.add_sized(
+                [widths[3 + n], 20.0],
+                Label::new(RichText::new(v).monospace().size(12.0)).selectable(false),
+            );
+        }
+        ui.add_sized(
+            [widths[8], 20.0],
+            Label::new(
+                RichText::new(format!("{:.1} %", st.loss_pct))
+                    .color(m.loss_text(st.loss_pct > 0.5))
+                    .monospace()
+                    .size(12.0),
+            )
+            .selectable(false),
+        );
+        ui.add_sized(
+            [widths[9], 20.0],
+            Label::new(
+                RichText::new(st.outliers.to_string())
+                    .color(m.warn_count(st.outliers > 0))
+                    .monospace()
+                    .size(12.0),
+            )
+            .selectable(false),
+        );
     });
 }
 
@@ -1736,22 +2122,11 @@ fn settings(ui: &mut Ui, app: &mut App) {
 
         ui.add_space(8.0);
         ui.group(|ui| {
-            ui.label(RichText::new("Benachrichtigung & Start").strong());
+            ui.label(RichText::new("Start").strong());
             ui.add_space(4.0);
-            // Three settings are stored but have no effect yet: the program plays no sound and
-            // has no tray icon, so the boxes are shown disabled instead of promising a feature
-            // that is not there. The options stay in the file for whoever implements them.
-            ui.add_enabled_ui(false, |ui| {
-                ui.checkbox(&mut app.options.sound_alerts, "Ton bei Ausfall / Wiederherstellung");
-                ui.checkbox(&mut app.options.system_tray_icon, "Symbol im Infobereich");
-                ui.checkbox(&mut app.options.minimised_to_tray, "Minimiert starten");
-            });
-            ui.label(
-                RichText::new("Noch nicht umgesetzt: Die Optionen werden gespeichert, haben aber keine Wirkung.")
-                    .weak()
-                    .size(11.5),
-            );
-            ui.add_space(4.0);
+            // A3: Ton, Infobereich und minimierter Start waren als Knöpfe zu sehen, obwohl das
+            // Programm nichts davon tut. Die Felder bleiben in der Datei für die, die es
+            // umsetzen; ein Knopf, der nichts bewirkt, ist schlimmer als kein Knopf.
             ui.horizontal(|ui| {
                 let on = app.autostart_state() == Some(true);
                 let mut v = on;
@@ -1760,6 +2135,94 @@ fn settings(ui: &mut Ui, app: &mut App) {
                 }
                 if app.autostart_state() == Some(false) {
                     ui.label(RichText::new("Autostart nicht möglich").color(app.theme_mode.warn()));
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            // A6: ein Ziel anlegen heißt heute drei Knöpfe suchen — Spalte, „+“, Kategorie. Hier
+            // gehören Name und Adresse hin, und die Kategorie entscheidet sich von selbst.
+            ui.label(RichText::new("Ziele").strong());
+            ui.add_space(4.0);
+            let mut add: Option<(String, String)> = None;
+            // Die Felder werden für den Frame aus der App genommen und am Ende zurückgelegt —
+            // sonst schreibt egui jeden Frame leere Strings hinein und die Eingabe verschwindet.
+            let mut pending_host: Option<String> = None;
+            let mut pending_label: Option<String> = None;
+            let mut drop_host = false;
+            let mut drop_label = false;
+            let host_id = ui.id().with(SETTINGS_HOST_ID_SALT);
+            let label_id = ui.id().with(SETTINGS_LABEL_ID_SALT);
+            let mut take = |id: egui::Id| {
+                app.settings_target_ids
+                    .remove(&id)
+                    .unwrap_or_default()
+            };
+            let host_key = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                let mut host = take(host_id);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut host)
+                            .hint_text("Adresse, z. B. 8.8.8.8")
+                            .desired_width(200.0),
+                    )
+                    .changed()
+                {
+                    pending_host = Some(host.clone());
+                }
+                let mut label = take(label_id);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut label)
+                            .hint_text("Name (leer = Adresse)")
+                            .desired_width(160.0),
+                    )
+                    .changed()
+                {
+                    pending_label = Some(label.clone());
+                }
+                // Enter im Adressfeld genügt — die Adresse ist das, was man zuerst tippt.
+                if (ui.button("Hinzufügen").clicked() || host_key) && !host.trim().is_empty() {
+                    add = Some((host.trim().to_string(), label.trim().to_string()));
+                    drop_host = true;
+                    drop_label = true;
+                }
+            });
+            if let Some(host) = pending_host {
+                app.settings_target_ids.insert(host_id, host);
+            }
+            if let Some(label) = pending_label {
+                app.settings_target_ids.insert(label_id, label);
+            }
+            if drop_host {
+                app.settings_target_ids.remove(&host_id);
+            }
+            if drop_label {
+                app.settings_target_ids.remove(&label_id);
+            }
+            if let Some((host, label)) = add {
+                // Ein neues Ziel wird auch gleich gemessen — sonst steht es als leere Zeile da und
+                // der erste Eindruck ist eine Null.
+                app.add_suggested_target(&host, &label);
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Vorschläge:").weak().size(11.5));
+                for (host, label) in [
+                    ("8.8.8.8", "Google DNS"),
+                    ("1.1.1.1", "Cloudflare"),
+                    ("9.9.9.9", "Quad9"),
+                    ("224.0.0.1", "Multicast"),
+                ] {
+                    if ui
+                        .small_button(label)
+                        .on_hover_text(format!("{host} hinzufügen und sofort messen"))
+                        .clicked()
+                    {
+                        app.add_suggested_target(host, label);
+                    }
                 }
             });
         });
@@ -1812,9 +2275,8 @@ fn settings(ui: &mut Ui, app: &mut App) {
                 {
                     app.open_export_dialog();
                 }
-                if ui.button("Speichern").clicked() {
-                    app.save_now();
-                }
+                // A2: kein „Speichern“-Knopf — es wird ohnehin bei jeder Änderung geschrieben, was
+                // der Knopf also verspricht, stimmt nicht. Die Statusleiste sagt jetzt, wann.
                 // Betrifft alle Ziele — deshalb sagt der Knopf das auch. Ein offener Editor wird
                 // vorher übernommen, sonst verschwinden die Werte unter den offenen Eingaben weg.
                 // Weil sich der Verlauf nicht zurückholen lässt, will der Knopf zwei Klicks: der
@@ -1879,14 +2341,31 @@ fn settings(ui: &mut Ui, app: &mut App) {
                 });
             });
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Vorschläge:").strong());
-                for (host, label) in [("8.8.8.8", "Google DNS"), ("1.1.1.1", "Cloudflare"), ("9.9.9.9", "Quad9")] {
-                    if ui.small_button(label).clicked() {
-                        app.add_named_target(host, label);
-                    }
-                }
-            });
+        });
+
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            // B1/C5: Kürzel, die nirgends nachzulesen sind, existieren nicht. Was hier steht, ist
+            // dieselbe Liste, die in der Leiste unter den Knöpfen steht.
+            ui.label(RichText::new("Tastatur").strong());
+            ui.add_space(4.0);
+            for (keys, what) in [
+                ("1 – 4", "Diagramm / Messwerte / Ereignisse / Einstellungen"),
+                ("Leertaste", "Alle Ziele starten oder anhalten"),
+                ("Esc", "Editor schließen, sonst zurück ins Live-Bild"),
+                ("← / →", "Zeitfenster eine halbe Breite weit schieben"),
+                ("Mausrad im Diagramm", "Zoomen, der Cursor bleibt dieselbe Zeit"),
+                ("Doppelklick im Diagramm", "Zurück zum laufenden Betrieb"),
+                ("Doppelklick in der Liste", "Zum Ausschlag springen"),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [180.0, 18.0],
+                        Label::new(RichText::new(keys).monospace().size(12.0)).selectable(false),
+                    );
+                    ui.label(RichText::new(what).size(12.0));
+                });
+            }
         });
 
         ui.add_space(8.0);

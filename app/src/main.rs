@@ -12,10 +12,27 @@ use system_ping::{app, store, ui};
 
 /// Command line: `--shot <file.png> [view]` draws ~120 frames and exits.
 fn screenshot_path_from_args() -> Option<(std::path::PathBuf, Option<String>)> {
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Die Ansicht ist das erste Wort ohne Bindestrich nach dem Dateinamen — mehrere Wörter dürfen
+    // es sein (`stats 6h`), ein Optionswort beendet die Suche dagegen. Sonst frisst
+    // `--shot out.png --theme dark stats` das `--theme` als Ansichtsname auf und läßt den Rest
+    // liegen, was stillschweigend das Diagramm statt der Messwerte zeigt.
+    let view_after = |i: usize| -> Option<String> {
+        let mut j = i;
+        while j < args.len() && !args[j].starts_with('-') {
+            j += 1;
+        }
+        if j == i {
+            None
+        } else {
+            Some(args[i..j].join(" "))
+        }
+    };
+    for (i, a) in args.iter().enumerate() {
         if a == "--screenshot" || a == "--shot" {
-            return it.next().map(|p| (std::path::PathBuf::from(p), it.next()));
+            return args
+                .get(i + 1)
+                .map(|p| (std::path::PathBuf::from(p), view_after(i + 2)));
         }
         if let Some(rest) = a
             .strip_prefix("--screenshot=")
@@ -75,6 +92,38 @@ fn collect_secs_from_args() -> Option<f64> {
     None
 }
 
+/// Die Hilfe zu den Befehlszeilenargumenten. Sie steht hier und nicht in der README, weil sie die
+/// einzige Erklärung ist, die jemand sieht, der das Programm im Terminal startet — und weil ein
+/// Fenster für `--help` niemandem hilft. Bewusst auf Deutsch: das ganze Programm spricht Deutsch.
+const HELP: &str = "\
+System-Ping Open Source — Latenz-Monitor
+
+Ohne Argumente öffnet sich das Fenster mit dem letzten Zustand (Ziele, Einstellungen,
+Fenstergröße). Messwerte werden alle 8 s automatisch in den Zustandsordner geschrieben.
+
+Argumente:
+  --help, -h              diese Übersicht zeigen und beenden
+  --theme <light|dark>    Aussehen für diesen Start erzwingen, ohne es zu speichern
+  --collect <sekunden>    im Fenster messen, berichten und beenden (Selbsttest)
+  --export-csv [datei]    gespeicherte Messwerte als CSV schreiben und beenden
+                          (ohne Dateiname: Standardordner, Zeitstempel im Namen)
+  --shot <datei.png> [ansicht]
+                          Bild der Oberfläche rechnen und beenden; Ansichten: chart,
+                          events, stats, settings, edit, dazu ein Zeitfenster wie 24h
+
+Umgebungsvariablen:
+  SYSTEM_PING_STATE_DIR   Zustandsordner (Dateien, Protokoll, Standard-Export) erzwingen
+  SYSTEM_PING_MAX_FRAMES  Bilderdurchlauf nach n Bildern abbrechen (nur für Testläufe)
+";
+
+/// Command line: `--help` prints [`HELP`] and exits. Answered before anything else — no state file
+/// read, no window built — because help must work even when the saved state is broken.
+fn help_requested() -> bool {
+    std::env::args()
+        .skip(1)
+        .any(|a| a == "--help" || a == "-h" || a == "/?")
+}
+
 /// The task-bar and title-bar icon, compiled into the program so no file has to travel with it.
 /// Decoded from PNG at startup; on failure an empty icon is handed out, which makes egui fall
 /// back to its own default rather than failing the whole start over a picture.
@@ -98,6 +147,13 @@ fn app_icon() -> eframe::egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    // Zuerst die Hilfe: sie darf nichts lesen und kein Fenster bauen, sonst scheitert sie genau in
+    // dem Moment, in dem jemand sie sucht.
+    if help_requested() {
+        print!("{HELP}");
+        return Ok(());
+    }
+
     // Load saved settings before the window exists — including where the window sat last time.
     let (options, saved, window) = store::load_with_window(&store::state_dir());
 

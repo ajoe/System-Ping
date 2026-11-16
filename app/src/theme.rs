@@ -10,6 +10,12 @@ pub const GOOD: Color32 = Color32::from_rgb(58, 163, 120);
 pub const OFFLINE: Color32 = Color32::from_rgb(120, 128, 142);
 pub const ORANGE: Color32 = Color32::from_rgb(236, 130, 56);
 
+/// The two text colours of the whole program: black in the light look, white in the dark one.
+/// Every word that is not an accent (an outage, a warning, a target's own line colour) uses one of
+/// them, in both looks — see [`apply`], which also hands them to egui so widgets inherit them.
+pub const BLACK_TEXT: Color32 = Color32::from_rgb(0, 0, 0);
+pub const WHITE_TEXT: Color32 = Color32::from_rgb(255, 255, 255);
+
 /// One entry of the automatic trace palette: a name to show in the picker and the two shades.
 pub struct Swatch {
     pub name: &'static str,
@@ -130,12 +136,10 @@ impl Mode {
         }
     }
 
-    /// Colour for the axis labels.
+    /// Colour for the axis labels. Same black / white as all other text, only quieter — a grey of
+    /// its own would read as a second text colour on the same screen.
     pub fn axis_text(self) -> Color32 {
-        match self {
-            Mode::Light => Color32::from_rgb(90, 96, 106),
-            Mode::Dark => Color32::from_rgb(140, 148, 162),
-        }
+        self.text_dim()
     }
 
     /// Colour for the panel behind the chart.
@@ -185,9 +189,46 @@ impl Mode {
     /// Colour of the text drawn directly by the painter (axis labels, tooltips).
     pub fn text(self) -> Color32 {
         match self {
-            Mode::Light => Color32::from_rgb(40, 44, 52),
-            Mode::Dark => Color32::from_gray(220),
+            Mode::Light => BLACK_TEXT,
+            Mode::Dark => WHITE_TEXT,
         }
+    }
+
+    /// Secondary text: deliberately not a grey of its own but the normal colour with alpha, so a
+    /// faint word is the *same* black or white as every other word, only quieter. That keeps one
+    /// look consistent while still letting a disabled row read as disabled.
+    pub fn text_dim(self) -> Color32 {
+        match self {
+            Mode::Light => BLACK_TEXT.gamma_multiply(0.7),
+            Mode::Dark => WHITE_TEXT.gamma_multiply(0.68),
+        }
+    }
+
+    /// Colour of selected (marked) text, i.e. the text on top of [`Self::selection_fill`].
+    pub fn selection_text(self) -> Color32 {
+        match self {
+            Mode::Light => WHITE_TEXT,
+            Mode::Dark => Color32::from_gray(16),
+        }
+    }
+
+    /// Background of selected text.
+    pub fn selection_fill(self) -> Color32 {
+        match self {
+            Mode::Light => Color32::from_rgb(40, 110, 200),
+            Mode::Dark => Color32::from_rgb(70, 130, 210),
+        }
+    }
+
+    /// Colour of a cursor in an input field.
+    pub fn text_cursor(self) -> Color32 {
+        self.text()
+    }
+
+    /// The normal text colour of this look — black on white, white on dark. Everything that is not
+    /// an accent uses it: labels, buttons, headings, input fields, painter text. See [`apply`].
+    pub fn text_normal(self) -> Color32 {
+        self.text()
     }
 
     /// Colour of the tooltip box behind that text.
@@ -272,10 +313,7 @@ impl Mode {
 
     /// Secondary text colour.
     pub fn text_weak(self) -> Color32 {
-        match self {
-            Mode::Light => Color32::from_rgb(96, 100, 108),
-            Mode::Dark => Color32::from_gray(170),
-        }
+        self.text_dim()
     }
 
     /// Text colour for a count of outliers.
@@ -335,11 +373,12 @@ impl Mode {
         }
     }
 
-    /// Text colour for something that is fine.
+    /// Text colour for something that is fine. In the dark look this used to be a grey, i.e. a
+    /// third kind of light text next to normal and weak text; now it is simply the normal white.
     pub fn ok_text(self) -> Color32 {
         match self {
             Mode::Light => Color32::from_rgb(40, 104, 68),
-            Mode::Dark => Color32::from_gray(170),
+            Mode::Dark => WHITE_TEXT,
         }
     }
 
@@ -418,6 +457,33 @@ pub fn apply(ctx: &egui::Context, mode: Mode) {
     // The panels in `ui` ask for these two by name, so they have to follow the look too.
     visuals.window_fill = mode.frame_fill();
     visuals.extreme_bg_color = mode.plot_fill();
+
+    // One text colour for everything: black on a bright look, white on a dark one. egui ships its
+    // light look with grey button and label text (gray 60–80) and its dark look with gray 140/180,
+    // so without this the same screen would mix three or four strengths of the same colour. All
+    // five widget states get the same value — a hovered button must not be brighter than a label
+    // next to it. `weak` and `strong` text then follow automatically: egui derives them from
+    // `noninteractive.fg_stroke` (fading towards the background) and `active.fg_stroke`, both of
+    // which are black / white now.
+    for state in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        state.fg_stroke.color = mode.text_normal();
+    }
+    // Input fields: the caret in the normal colour instead of egui's light-blue default. (The type
+    // itself is not re-exported by egui 0.31, so only the field is reachable — which is enough to
+    // change the stroke.) The placeholder of an empty field does not need its own colour: egui
+    // paints it with `weak_text_color()`, i.e. this look's black or white, faded a little.
+    visuals.text_cursor.stroke = Stroke::new(1.5_f32, mode.text_cursor());
+    visuals.override_text_color = None;
+    // Marked text: the look's own text colour would be invisible on the selection background, so
+    // this one combination is deliberately inverted (white on blue / dark on blue).
+    visuals.selection.bg_fill = mode.selection_fill();
+    visuals.selection.stroke = Stroke::new(1.0_f32, mode.selection_text());
 
     style.visuals = visuals;
     ctx.set_style(style);

@@ -20,7 +20,13 @@ fn export_reports_its_result() {
 
     let out = dir.join("out.csv");
     app.export_csv(out.clone());
-    assert_eq!(app.status_msg, "Schreibe CSV-Datei …");
+    // Der Pfad steht jetzt in der Meldung — bei einem langsamen Netzlaufwerk ist ein schreibender
+    // Export nach einer Sekunde nicht von einem hängenden Fenster zu unterscheiden.
+    assert!(
+        app.status_msg.starts_with("Schreibe CSV-Datei …") && app.status_msg.contains("out.csv"),
+        "die Statuszeile nennt nicht die Datei: {:?}",
+        app.status_msg
+    );
 
     // Der Schreibthread braucht einen Moment; danach holt tick() die Meldung ab.
     let mut seen = String::new();
