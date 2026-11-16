@@ -22,6 +22,23 @@ cargo clippy --all-targets   # sauber
 
 Die Tests brauchen kein Internet: sie pingen `127.0.0.1` mit dem echten `ping.exe`.
 
+### Symbol der Programmdatei
+
+`app/build.rs` hängt die Windows-Ressourcen zur Buildzeit an: `assets/icon.ico` als
+Dateisymbol (16/32/48/64/256 px) und ein Versionsblock mit Name, Fassung und Sprache.
+Das erledigt die Kiste [`winresource`], die aus einer `.rc` eine `.res` macht; der normale
+Linker bettet sie ein, es braucht keinen extra Schritt und kein Nachbearbeiten der `.exe`.
+
+```sh
+cargo build --release   # .res entsteht in app/target/release/build/system-ping/*/out/
+```
+
+Ist `assets/icon.ico` neuer als die letzte Übersetzung, baut `build.rs` neu
+(`cargo:rerun-if-changed`). Das Fenstersymbol zur Laufzeit ist unabhängig davon direkt in
+`main.rs` eingebettet (`assets/icon.png`), damit auch `cargo run` ein Symbol zeigt.
+
+[`winresource`]: https://crates.io/crates/winresource
+
 ## Benutzen
 
 ```
@@ -132,6 +149,8 @@ abgeschaltet: Ton bei Ausfall/Wiederherstellung, Symbol im Infobereich, minimier
 
 ## Ordner
 
-* `app/` — Crate (Quellcode in `app/src`, GUI-freie Tests in `app/tests`)
+* `app/` — Crate (Quellcode in `app/src`, GUI-freie Tests in `app/tests`, `build.rs` für die
+  Windows-Ressourcen)
+* `assets/` — `icon.ico` (Dateisymbol) und `icon.png` (Fenstersymbol zur Laufzeit)
 * `reference/` — Screenshots des Vorbilds und eigene Vergleichsbilder
 * `capture/` — Hinweise zum Referenzmaterial
