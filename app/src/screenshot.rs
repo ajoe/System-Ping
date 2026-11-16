@@ -346,8 +346,9 @@ impl eframe::App for SelfTest {
         if !self.reported && (time_up || self.frames_left == 0) {
             self.reported = true;
             // Every target says what it saw, so a probe that resolves but never answers is
-            // visible here as well — a plain sample count would hide that. `antworten` counts
-            // the replies: a run that only recorded timeouts would otherwise look healthy.
+            // visible here as well — a plain sample count would hide that. `replies` counts them:
+            // a run that only recorded timeouts would otherwise look healthy. These lines are the
+            // machine-readable part of the tool, so they stay English in both interface languages.
             let mut ok_samples = 0usize;
             for t in &self.app.targets {
                 let last = t.series.last();
@@ -359,7 +360,7 @@ impl eframe::App for SelfTest {
                     .count();
                 ok_samples += ok;
                 println!(
-                    "collect: {:<14} {:<20} samples={} antworten={} letzte={}",
+                    "collect: {:<14} {:<20} samples={} replies={} last={}",
                     t.label,
                     t.host,
                     t.series.len(),
