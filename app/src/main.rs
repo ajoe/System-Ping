@@ -228,7 +228,7 @@ fn main() -> eframe::Result<()> {
     if let Some(path) = export_csv_from_args() {
         return match app::export_history_to(&saved, &path) {
             Ok(n) => {
-                println!("csv: {} Zeilen -> {}", n, path.display());
+                println!("csv: {} rows -> {}", n, path.display());
                 Ok(())
             }
             Err(e) => {
