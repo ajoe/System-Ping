@@ -13,10 +13,10 @@ use system_ping::{app, store, ui};
 /// Command line: `--shot <file.png> [view]` draws ~120 frames and exits.
 fn screenshot_path_from_args() -> Option<(std::path::PathBuf, Option<String>)> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Die Ansicht ist das erste Wort ohne Bindestrich nach dem Dateinamen — mehrere Wörter dürfen
-    // es sein (`stats 6h`), ein Optionswort beendet die Suche dagegen. Sonst frisst
-    // `--shot out.png --theme dark stats` das `--theme` als Ansichtsname auf und läßt den Rest
-    // liegen, was stillschweigend das Diagramm statt der Messwerte zeigt.
+    // The view is the first word after the file name that does not start with a dash — it may be
+    // several words (`stats 6h`), while an option word ends the search. Otherwise
+    // `--shot out.png --theme dark stats` would swallow `--theme` as the view name and leave the
+    // rest behind, quietly showing the chart instead of the statistics.
     let view_after = |i: usize| -> Option<String> {
         let mut j = i;
         while j < args.len() && !args[j].starts_with('-') {
@@ -71,6 +71,33 @@ fn theme_override_from_args() -> Option<String> {
     None
 }
 
+/// Command line: `--lang <de|en>` picks the interface language for this run, without touching the
+/// saved file — the same rule as `--theme`. A word that is neither language simply says nothing, so
+/// a typo cannot silently switch the window to something nobody asked for.
+fn lang_override_from_args() -> Option<system_ping::i18n::Lang> {
+    let known = |s: &str| match s.to_ascii_lowercase().as_str() {
+        "de" | "en" => Some(system_ping::i18n::Lang::from_code(s)),
+        _ => None,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--lang" || a == "--language" {
+            if let Some(v) = it.next().and_then(|v| known(&v)) {
+                return Some(v);
+            }
+        }
+        if let Some(rest) = a
+            .strip_prefix("--lang=")
+            .or_else(|| a.strip_prefix("--language="))
+        {
+            if let Some(l) = known(rest) {
+                return Some(l);
+            }
+        }
+    }
+    None
+}
+
 /// Command line: `--collect <secs>` runs the real window for a while, prints how many samples
 /// the live loop actually recorded, and exits. This is the check that a GUI run measures at all:
 /// before the frame loop called `tick`, such a run reported zero samples forever.
@@ -92,10 +119,12 @@ fn collect_secs_from_args() -> Option<f64> {
     None
 }
 
-/// Die Hilfe zu den Befehlszeilenargumenten. Sie steht hier und nicht in der README, weil sie die
-/// einzige Erklärung ist, die jemand sieht, der das Programm im Terminal startet — und weil ein
-/// Fenster für `--help` niemandem hilft. Bewusst auf Deutsch: das ganze Programm spricht Deutsch.
-const HELP: &str = "\
+/// The command-line help, in both languages. It lives here rather than in the README because it is
+/// the only explanation someone who starts the program in a terminal will actually see — and
+/// because a window for `--help` helps nobody. Which table answers depends on `--lang`; without it,
+/// German. Keep both between the HELPSTART/HELPEND markers so the READMEs can quote them as the
+/// program's own output.
+const HELP_DE: &str = "\
 System-Ping Open Source — Latenz-Monitor
 
 Ohne Argumente öffnet sich das Fenster mit dem letzten Zustand (Ziele, Einstellungen,
@@ -103,6 +132,7 @@ Fenstergröße). Messwerte werden alle 8 s automatisch in den Zustandsordner ges
 
 Argumente:
   --help, -h              diese Übersicht zeigen und beenden
+  --lang <de|en>          Sprache der Oberfläche für diesen Start, ohne sie zu speichern
   --theme <light|dark>    Aussehen für diesen Start erzwingen, ohne es zu speichern
   --collect <sekunden>    im Fenster messen, berichten und beenden (Selbsttest)
   --export-csv [datei]    gespeicherte Messwerte als CSV schreiben und beenden
@@ -116,8 +146,40 @@ Umgebungsvariablen:
   SYSTEM_PING_MAX_FRAMES  Bilderdurchlauf nach n Bildern abbrechen (nur für Testläufe)
 ";
 
-/// Command line: `--help` prints [`HELP`] and exits. Answered before anything else — no state file
-/// read, no window built — because help must work even when the saved state is broken.
+const HELP_EN: &str = "\
+System-Ping Open Source — latency monitor
+
+Without arguments the window opens with the last state (targets, settings, window size).
+Measurements are written to the state folder automatically every 8 s.
+
+Arguments:
+  --help, -h              show this overview and exit
+  --lang <de|en>          interface language for this run, without saving it
+  --theme <light|dark>    force the look for this run, without saving it
+  --collect <seconds>     measure in the window, report and exit (self test)
+  --export-csv [file]     write the stored measurements as CSV and exit
+                          (without a file name: default folder, timestamp in the name)
+  --shot <file.png> [view]
+                          render a picture of the interface and exit; views: chart,
+                          events, stats, settings, edit, plus a horizon such as 24h
+
+Environment variables:
+  SYSTEM_PING_STATE_DIR   force the state folder (files, protocol, default export)
+  SYSTEM_PING_MAX_FRAMES  abort the frame loop after n pictures (test runs only)
+";
+
+/// The help text for this run's language. `--lang` is read straight from the command line here, so
+/// a broken state file can still not keep `--help` from answering.
+fn help_text() -> &'static str {
+    match lang_override_from_args() {
+        Some(system_ping::i18n::Lang::En) => HELP_EN,
+        _ => HELP_DE,
+    }
+}
+
+/// Command line: `--help` prints [`HELP_DE`] or [`HELP_EN`] and exits. Answered before anything else
+/// — no state file read, no window built — because help must work even when the saved state is
+/// broken.
 fn help_requested() -> bool {
     std::env::args()
         .skip(1)
@@ -140,17 +202,17 @@ fn app_icon() -> eframe::egui::IconData {
             }
         }
         Err(e) => {
-            eprintln!("icon.png konnte nicht gelesen werden: {e}");
+            eprintln!("could not read icon.png: {e}");
             eframe::egui::IconData::default()
         }
     }
 }
 
 fn main() -> eframe::Result<()> {
-    // Zuerst die Hilfe: sie darf nichts lesen und kein Fenster bauen, sonst scheitert sie genau in
-    // dem Moment, in dem jemand sie sucht.
+    // Help comes first: it must not read anything or open a window, or it fails at exactly the
+    // moment someone is looking for it.
     if help_requested() {
-        print!("{HELP}");
+        print!("{}", help_text());
         return Ok(());
     }
 
@@ -184,10 +246,13 @@ fn main() -> eframe::Result<()> {
     // A command-line theme wins over the saved one (used to check both looks). It is passed
     // to the app as an override so it never gets written back to the state file.
     let theme_override = theme_override_from_args();
+    // The same for the interface language: the title bar has to speak the language of this run,
+    // and it is built before the app exists.
+    let lang = lang_override_from_args().unwrap_or(options.language);
     let mut vp = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1080.0, 700.0])
         .with_min_inner_size([640.0, 420.0])
-        .with_title("System-Ping Open Source — Latenz-Monitor")
+        .with_title(lang.app_title())
         .with_icon(app_icon());
     // The window comes back where it was. A geometry from a file that has since gone bad (a size
     // of zero, numbers that are not numbers) is dropped silently and the default above stands.
@@ -215,14 +280,16 @@ fn main() -> eframe::Result<()> {
 
     match shot {
         Some((path, view)) => eframe::run_native(
-            "System-Ping Open Source",
+            lang.app_title(),
             native,
             Box::new(move |cc| {
-                let a = system_ping::app::App::with_theme_override(
+                let mut a = system_ping::app::App::with_theme_override(
                     options,
                     saved,
                     theme_override.as_deref(),
                 );
+                // A `--lang` run shows that language without recording it in the file.
+                app::set_language_silently(&mut a, lang);
                 system_ping::theme::apply(&cc.egui_ctx, a.theme_mode);
                 let edit_row = view
                     .as_deref()
@@ -234,14 +301,16 @@ fn main() -> eframe::Result<()> {
             }),
         ),
         None => eframe::run_native(
-            "System-Ping Open Source",
+            lang.app_title(),
             native,
             Box::new(move |cc| {
-                let a = system_ping::app::App::with_theme_override(
+                let mut a = system_ping::app::App::with_theme_override(
                     options,
                     saved,
                     theme_override.as_deref(),
                 );
+                // A `--lang` run shows that language without recording it in the file.
+                app::set_language_silently(&mut a, lang);
                 // Paint the chosen look before the first frame is drawn.
                 system_ping::theme::apply(&cc.egui_ctx, a.theme_mode);
                 match collect {

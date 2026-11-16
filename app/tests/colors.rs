@@ -20,7 +20,7 @@ fn jedes_ziel_kriegt_eigene_farbe() {
     let app = new_app("auto");
     assert!(
         app.targets.len() >= 3,
-        "der Test braucht mehrere Ziele, um trennen zu können"
+        "the test needs several targets in order to tell them apart"
     );
     // Automatic means: nothing chosen, and the palette decides by position.
     for t in &app.targets {
@@ -31,9 +31,9 @@ fn jedes_ziel_kriegt_eigene_farbe() {
         let idx = app.color_idx_of(t);
         assert!(
             idx < theme::PALETTE_LEN,
-            "farbe {idx} ist nicht in der Palette"
+            "colour {idx} is not in the palette"
         );
-        assert!(!used.contains(&idx), "Ziel {} teilt sich eine Farbe", t.id);
+        assert!(!used.contains(&idx), "target {} shares a colour", t.id);
         used.push(idx);
         // What the chart paints is exactly that palette entry, in the shade of the current look.
         assert_eq!(
@@ -46,25 +46,25 @@ fn jedes_ziel_kriegt_eigene_farbe() {
 #[test]
 fn manuelle_farbe_verdraengt_die_automatik() {
     let mut app = new_app("manuell");
-    // Ziel 0 gets a fixed colour; the automatic ones have to route around it.
+    // Target 0 gets a fixed colour; the automatic ones have to route around it.
     app.targets[0].color_idx = 1;
     let mut used = vec![app.color_idx_of(&app.targets[0])];
-    assert_eq!(used[0], 1, "eine gewählte Farbe gilt unverändert");
+    assert_eq!(used[0], 1, "a chosen colour is valid unchanged");
     for t in app.targets.iter().skip(1) {
         let idx = app.color_idx_of(t);
-        assert!(!used.contains(&idx), "Ziel {} teilt sich eine Farbe", t.id);
+        assert!(!used.contains(&idx), "target {} shares a colour", t.id);
         used.push(idx);
     }
 }
 
 #[test]
 fn mehr_ziele_als_farben_wiederverwenden_die_palette() {
-    let mut app = new_app("ueberlauf");
+    let mut app = new_app("overflow");
     // Beyond the palette size a colour has to be used twice; that must still be a valid entry and
     // must never leave a target without a line colour.
     while app.targets.len() <= theme::PALETTE_LEN + 2 {
         let n = app.targets.len();
-        app.add_named_target(&format!("10.0.0.{n}"), &format!("Ziel {n}"));
+        app.add_named_target(&format!("10.0.0.{n}"), &format!("Target {n}"));
     }
     for t in &app.targets {
         let idx = app.color_idx_of(t);
@@ -77,7 +77,7 @@ fn mehr_ziele_als_farben_wiederverwenden_die_palette() {
 }
 
 #[test]
-fn gewaehlte_farbe_ueberlebt_einen_neustart() {
+fn a_chosen_colour_survives_a_restart() {
     let mut app = new_app("persist");
     app.targets[1].color_idx = 5;
     app.save_now();
@@ -97,10 +97,10 @@ fn gewaehlte_farbe_ueberlebt_einen_neustart() {
 
 #[test]
 fn ein_altes_profil_ohne_farbe_bekommt_automatik() {
-    // Ein Profil, dem das neue Feld fehlt, muss weiterladen: serde nimmt dann den Feld-Standard,
-    // und der ist die automatische Farbe. Der Weg führt durch dieselbe Datei und denselben Loader,
-    // den die App beim Start benutzt — ein ausgedachtes JSON würde an jeder Kleinigkeit scheitern,
-    // die nichts mit der Farbe zu tun hat.
+    // A profile without the new field still has to load: serde then uses the field default,
+    // and that is the automatic colour. The way goes through the same file and the same loader the
+    // app uses at start-up — an invented JSON would fail on every little detail,
+    // which has nothing to do with colours.
     let dir = std::env::temp_dir().join("sp-colors-alt");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
@@ -116,11 +116,11 @@ fn ein_altes_profil_ohne_farbe_bekommt_automatik() {
         .as_object_mut()
         .unwrap()
         .remove("color_idx");
-    assert!(removed.is_some(), "ein aktuelles Profil enthält die Farbe");
+    assert!(removed.is_some(), "a current profile contains the colour");
     std::fs::write(&path, serde_json::to_string(&written).unwrap()).unwrap();
 
     let (options, saved) = system_ping::store::load_from(&dir);
-    assert_eq!(saved.len(), 1, "das alte Profil muss sich laden lassen");
+    assert_eq!(saved.len(), 1, "the old profile has to be loadable");
     assert_eq!(saved[0].color_idx, AUTO_COLOR);
 
     // And the loaded profile is a normal starting point for the app.

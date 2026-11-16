@@ -1,4 +1,7 @@
 //! CSV export of the recorded samples, and the optional protocol file.
+//!
+//! The column headers stay German on purpose: they belong to the exported data, not to
+//! the interface, so a CSV reads the same whatever language the app shows.
 
 use crate::history::{self, Fail, Series};
 use std::io::Write;

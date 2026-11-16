@@ -2,6 +2,7 @@
 
 use crate::app::{self, App, LogKind, TargetKind, View};
 use crate::history;
+use crate::i18n::{self, Lang};
 use crate::store;
 use crate::theme::{self, Mode};
 use egui::{Color32, CursorIcon, FontId, Label, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
@@ -14,12 +15,12 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     center(ctx, app);
 }
 
-/// Dasselbe Spiel für die beiden Zielfelder in der Einstellungen-Gruppe „Ziele“: eigene Salts, weil
-/// das Adressfeld sonst mit dem oben in der Leiste denselben Zustand teilte — inklusive Fokus.
+/// The same for the two target fields of the settings "Targets" group: their own salts, because the
+/// address field would otherwise share its state with the one in the top bar — focus included.
 const SETTINGS_HOST_ID_SALT: &str = "settings_host_field";
 const SETTINGS_LABEL_ID_SALT: &str = "settings_label_field";
 
-/// Text for a selectable control (the four view buttons, the category chips, „nur Störungen“, the
+/// Text for a selectable control (the four view buttons, the category chips, "outages only", the
 /// colour scheme). `.weak()` would be the natural way to make these look like quiet controls, and it
 /// used to be written on every one of them — but egui resolves `weak` *before* painting: the galley
 /// already carries the faded colour, and the widget's own text colour (black / white, see
@@ -39,7 +40,7 @@ fn selectable_text(label: impl Into<String>, shortcut: &str) -> RichText {
     RichText::new(text)
 }
 
-/// The two new-target fields in the top bar have to be found by id, because „Enter adds a target“
+/// The two new-target fields in the top bar have to be found by id, because "Enter adds a target"
 /// should only fire while one of them has the focus. `TextEdit` derives its id from an explicit
 /// salt for exactly that reason — without it the id would follow the widget's position and change
 /// whenever the bar rewraps.
@@ -54,6 +55,7 @@ const NEW_LABEL_ID_SALT: &str = "new_label_field";
 /// "what the app does" (title, new target, start/stop), the second is "what is on screen" (view,
 /// filter). Cramped together they wrapped into each other at the minimum window width.
 pub fn top(ctx: &egui::Context, app: &mut App) {
+    let lang = app.lang();
     let m = app.theme_mode;
     // Set when something worth persisting changed; the state is written once at the end of the
     // panel so a click on a category chip cannot be lost until the next autosave.
@@ -69,53 +71,58 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
             // takes input, so the row stays one clean line at any window width.
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("System-Ping").color(m.accent()).strong());
-                ui.label(RichText::new("Latenz-Monitor").weak());
+                ui.label(RichText::new(lang.subtitle()).weak());
                 ui.separator();
                 // The chart window's preset picker (up to 24 h). It sits with the title because it
                 // says how much of the picture is shown, not what is being measured.
                 let combo = egui::ComboBox::from_id_salt("horizon_top")
-                    .selected_text(horizon_label(app.options.horizon_secs))
+                    .selected_text(horizon_label(lang, app.options.horizon_secs))
                     .width(72.0)
                     .show_ui(ui, |ui| {
                         for c in app::HORIZON_CHOICES {
-                            ui.selectable_value(&mut app.options.horizon_secs, c.secs, c.label);
+                            ui.selectable_value(
+                                &mut app.options.horizon_secs,
+                                c.secs,
+                                horizon_choice_label(lang, c),
+                            );
                         }
                     });
-                let _ = combo.response.on_hover_text("Zeitfenster des Diagramms");
+                let _ = combo.response.on_hover_text(lang.tip_horizon());
                 if ui
                     .add(egui::SelectableLabel::new(
                         app.follow_live,
-                        if app.follow_live { "● Live" } else { "○ Live" },
+                        if app.follow_live {
+                            "● Live"
+                        } else {
+                            "○ Live"
+                        },
                     ))
-                    .on_hover_text(
-                        "Dem aktuellen Zeitfenster folgen — aus, wenn im Diagramm zurückgeblättert \
-                         wird; Doppelklick ins Diagramm oder Esc schaltet es wieder ein",
-                    )
+                    .on_hover_text(lang.tip_follow_live())
                     .clicked()
                 {
                     app.follow_live = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Der Weg zum Zustandsordner gehört dorthin, wo die Datei entsteht: wer wissen
-                    // will, was gespeichert ist, hat gerade auf den Titel geschaut.
+                    // The path to the state folder belongs where the file is created: someone who
+                    // wants to know what is stored has just been looking at the title.
                     if ui
-                        .small_button("⌂ Daten")
-                        .on_hover_text("Zustandsordner im Explorer öffnen (Datei, Protokoll, Exporte)")
+                        .small_button(lang.data_folder_btn())
+                        .on_hover_text(lang.tip_data_folder())
                         .clicked()
                     {
                         app.open_state_folder();
                     }
-                    // Der Autostart-Knopf ist nur sichtbar, solange nicht gemessen wird.
+                    // The autostart button is only visible while nothing is being measured.
                     // `autostart_state()` is the registry's answer (looked up at startup, then kept
-                    // current); the raw counter alone would be „aus“ until the user presses this.
+                    // current); the raw counter alone would read "off" until the user presses this.
                     if !app.running
                         && ui
                             .button(if app.autostart_state() == Some(true) {
-                                "Autostart: an"
+                                lang.autostart_on()
                             } else {
-                                "Autostart: aus"
+                                lang.autostart_off()
                             })
-                            .on_hover_text("Beim Anmelden von Windows starten")
+                            .on_hover_text(lang.tip_autostart_top())
                             .clicked()
                     {
                         let on = app.autostart_state() != Some(true);
@@ -123,9 +130,9 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                     }
                     if ui
                         .button(if app.running {
-                            "■ Alle stoppen"
+                            lang.stop_all()
                         } else {
-                            "▶ Alle starten"
+                            lang.start_all()
                         })
                         .clicked()
                     {
@@ -149,13 +156,13 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                     [190.0, 22.0],
                     egui::TextEdit::singleline(&mut app.new_host)
                         .id_salt(NEW_HOST_ID_SALT)
-                        .hint_text("Ziel, z. B. 192.168.1.1"),
+                        .hint_text(lang.hint_new_host()),
                 );
                 ui.add_sized(
                     [130.0, 22.0],
                     egui::TextEdit::singleline(&mut app.new_label)
                         .id_salt(NEW_LABEL_ID_SALT)
-                        .hint_text("Name (optional)"),
+                        .hint_text(lang.hint_new_label()),
                 );
                 // Remembered for the Enter check at the end of the panel: these are the ids the
                 // two fields were given, which is what `Memory::focused` will report.
@@ -167,7 +174,7 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 // key press meant for the chart or a combo box would silently create a row. The
                 // press itself is detected after the panel (see below) because `Ui::input` does not
                 // see keys that a text field already claimed.
-                if ui.button("+ Ziel").clicked() {
+                if ui.button(lang.add_target_short()).clicked() {
                     add = true;
                 }
                 if add {
@@ -192,28 +199,31 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 // number stays legible without opening the list.
                 let before = app.options.interval_secs;
                 egui::ComboBox::from_id_salt("interval_top")
-                    .selected_text(app::interval_label(before))
+                    .selected_text(app::interval_label(lang, before))
                     .width(72.0)
                     .show_ui(ui, |ui| {
                         for c in app::INTERVAL_CHOICES {
-                            ui.selectable_value(&mut app.options.interval_secs, *c, app::interval_label(*c));
+                            ui.selectable_value(
+                                &mut app.options.interval_secs,
+                                *c,
+                                app::interval_label(lang, *c),
+                            );
                         }
                     })
                     .response
-                    .on_hover_text(app::interval_hint(before));
+                    .on_hover_text(app::interval_hint(lang, before));
                 if (app.options.interval_secs - before).abs() > f32::EPSILON {
                     save_now = true;
                 }
                 ui.separator();
-                // Views first: they decide what the rest of the window shows. Die Ziffer dahinter ist
-                // kein Schmuck, sondern das Kürzel (`View::shortcut`) — und die Ansicht nennt es jetzt
-                // selbst, damit Knopf, Tastatur und Einstellungen nicht drei verschiedene Listen
-                // pflegen.
+                // Views first: they decide what the rest of the window shows. The digit behind a name
+                // is not decoration but its shortcut (`View::shortcut`) — and the view now names it
+                // itself, so button, keyboard and settings do not maintain three different lists.
                 for view in [View::Chart, View::Events, View::Stats, View::Settings] {
                     let sel = app.view == view;
                     if ui
-                        .selectable_label(sel, selectable_text(view.label(), view.shortcut()))
-                        .on_hover_text(view.hint())
+                        .selectable_label(sel, selectable_text(lang.view(view), view.shortcut()))
+                        .on_hover_text(lang.view_hint(view))
                         .clicked()
                     {
                         app.view = view;
@@ -222,7 +232,7 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 ui.separator();
                 ui.add_sized(
                     [160.0, 22.0],
-                    egui::TextEdit::singleline(&mut app.filter).hint_text("Ziele filtern"),
+                    egui::TextEdit::singleline(&mut app.filter).hint_text(lang.hint_filter()),
                 );
                 if !app.filter.is_empty() && ui.button("✕").clicked() {
                     app.filter.clear();
@@ -236,28 +246,31 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                         continue;
                     }
                     let on = !app.options.kinds_off.contains(&app::kind_index(k));
-                    // Das Wort „aus“ am Chip: ohne es sieht ein ausgeblendeter Schalter aus wie ein
-                    // Knopf, der nicht reagiert. So steht an der Stelle, was Sache ist.
+                    // The word "off" on the chip: without it a switched-off toggle looks like a
+                    // button that does not respond. This way the spot says what is going on.
                     let mut chip = ui.selectable_label(
                         on,
                         selectable_text(
                             if on {
-                                k.label().to_string()
+                                lang.kind(k).to_string()
                             } else {
-                                format!("{} aus", k.label())
+                                i18n::fill(
+                                    lang.filter_off_fmt(),
+                                    &[("k", lang.kind(k).to_string())],
+                                )
                             },
                             "",
                         ),
                     );
                     if !on {
-                        chip = chip.on_hover_text(format!(
-                            "{k} wieder einblenden — im Moment ist die ganze Kategorie verborgen",
-                            k = k.label()
+                        chip = chip.on_hover_text(i18n::fill(
+                            lang.tip_kind_show_fmt(),
+                            &[("k", lang.kind(k).to_string())],
                         ));
                     } else {
-                        chip = chip.on_hover_text(format!(
-                            "{k} ausblenden — alle Ziele dieser Kategorie sind im Diagramm und in den Listen verborgen, gemessen wird weiter",
-                            k = k.label()
+                        chip = chip.on_hover_text(i18n::fill(
+                            lang.tip_kind_hide_fmt(),
+                            &[("k", lang.kind(k).to_string())],
                         ));
                     }
                     if !on {
@@ -270,8 +283,8 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 }
                 if !app.all_kinds_on()
                     && ui
-                        .small_button("alle")
-                        .on_hover_text("Alle Kategorien wieder einblenden")
+                        .small_button(lang.all())
+                        .on_hover_text(lang.tip_all_kinds())
                         .clicked()
                 {
                     app.show_all_kinds();
@@ -290,8 +303,9 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                 mem.focused()
                     .is_some_and(|id| app.new_target_ids.contains(&id))
             });
-            let want_add =
-                ui.input(|i| i.key_pressed(egui::Key::Enter)) && focused && !app.new_host.is_empty();
+            let want_add = ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && focused
+                && !app.new_host.is_empty();
             if want_add {
                 // Adding a target would shift the index the inline editor points at, so any open
                 // editor is committed first.
@@ -362,7 +376,7 @@ fn short_cuts(ctx: &egui::Context, app: &mut App) {
             quit_edit = app.edit_idx.is_some();
         }
     });
-    // Esc first cancels an open editor; only without one does it mean „back to the live edge“.
+    // Esc first cancels an open editor; only without one does it mean "back to the live edge".
     if quit_edit {
         app.cancel_edit();
     } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -427,6 +441,7 @@ pub fn clicked_in_row(ctx: &egui::Context, rects: &[Rect]) -> Option<usize> {
 const ROW_H: f32 = 39.0;
 
 pub fn left_body(ui: &mut Ui, app: &mut App) {
+    let lang = app.lang();
     // Which row the current click belongs to, decided once before the rows are built. The rects
     // come from the previous pass; a real click always follows a pass that drew the rows.
     let clicked_row = clicked_in_row(ui.ctx(), &app.row_rects);
@@ -439,7 +454,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
     };
     let m = app.theme_mode;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Ziele").strong());
+        ui.label(RichText::new(lang.targets()).strong());
         let vis = app.visible_targets().len();
         ui.label(RichText::new(format!("{}/{}", vis, app.targets.len())).weak());
     });
@@ -455,7 +470,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             // Collect actions first to avoid borrow conflicts.
             let mut edit_action: Option<fn(&mut App)> = None;
             let mut begin_edit_idx: Option<usize> = None;
-            // Set by the „entfernen“ button inside an open editor: which target to delete once the
+            // Set by the "entfernen" button inside an open editor: which target to delete once the
             // list is no longer borrowed.
             let mut remove_idx: Option<usize> = None;
             // A colour change has to be written back to disk right away, like every other setting.
@@ -484,15 +499,18 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                 };
                 let label = t.label.clone();
                 let host = t.host.clone();
-                let kind_label = t.kind.label().to_string();
+                let kind_label = lang.kind(t.kind).to_string();
                 let enabled = t.enabled;
                 let auto_idx = app.color_idx_of(t);
                 // Which palette slot this line uses, said plainly: automatic or picked by hand.
                 // Shown as a tooltip on the colour dash in the row.
                 let trace_tip = if auto_idx == crate::app::AUTO_COLOR {
-                    "Linienfarbe automatisch — im Editor wählbar".to_string()
+                    lang.tip_color_auto().to_string()
                 } else {
-                    format!("Linienfarbe selbst gewählt ({})", auto_idx + 1)
+                    i18n::fill(
+                        lang.tip_color_chosen_fmt(),
+                        &[("n", (auto_idx + 1).to_string())],
+                    )
                 };
                 // Details for this one target: how much history is kept, and what it says about
                 // the current window.
@@ -528,29 +546,34 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                                 ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                             let dot_rect = dot_rect.shrink(1.5);
                             ui.painter().rect_filled(dot_rect, 5.5, color);
-                            // Der Farbstrich: dieselbe Farbe wie die Linie im Diagramm, damit schon
-                            // die Liste sagt, welche Kurve zu welchem Ziel gehört.
+                            // The colour dash: the same colour as the line in the chart, so the list
+                            // alone already says which curve belongs to which target.
                             let (line_rect, _) =
                                 ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
                             ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
-                            // Das Ziel loswerden, an dem man gerade arbeitet: ersetzt den Knopf
-                            // „Ziel entfernen“ oben rechts, der das markierte Ziel traf und damit
-                            // leicht das falsche erwischte.
+                            // Getting rid of the target one is working on: replaces the "remove
+                            // target" button in the top right, which hit the selected target and so
+                            // easily grabbed the wrong one.
                             if ui
-                                .small_button(RichText::new("entfernen").color(m.danger_text()))
-                                .on_hover_text(format!("{label} entfernen"))
+                                .small_button(
+                                    RichText::new(lang.remove_short()).color(m.danger_text()),
+                                )
+                                .on_hover_text(i18n::fill(
+                                    lang.tip_remove_fmt(),
+                                    &[("label", label.clone())],
+                                ))
                                 .clicked()
                             {
                                 remove_idx = Some(idx);
                             }
-                            ui.label(RichText::new("Bearbeiten").strong().size(12.0));
+                            ui.label(RichText::new(lang.edit_heading()).strong().size(12.0));
 
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
                                         .small_button("✕")
-                                        .on_hover_text("Änderungen verwerfen (Esc)")
+                                        .on_hover_text(lang.tip_discard_edit())
                                         .clicked()
                                     {
                                         edit_action = Some(App::cancel_edit);
@@ -563,13 +586,13 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                         ui.add_sized(
                             [215.0, 20.0],
                             egui::TextEdit::singleline(&mut app.edit_label)
-                                .hint_text("Name (optional)")
+                                .hint_text(lang.hint_new_label())
                                 .vertical_align(egui::Align::Center),
                         );
                         ui.add_sized(
                             [215.0, 20.0],
                             egui::TextEdit::singleline(&mut app.edit_host)
-                                .hint_text("Adresse")
+                                .hint_text(lang.hint_address())
                                 .font(FontId::monospace(12.5))
                                 .vertical_align(egui::Align::Center),
                         );
@@ -578,29 +601,28 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                         ui.horizontal(|ui| {
                             egui::ComboBox::from_id_salt("edit_kind")
                                 .width(96.0)
-                                .selected_text(RichText::new(app.edit_kind.label()).size(12.0))
+                                .selected_text(RichText::new(lang.kind(app.edit_kind)).size(12.0))
                                 .show_ui(ui, |ui| {
                                     for k in TargetKind::all() {
-                                        ui.selectable_value(&mut app.edit_kind, k, k.label());
+                                        ui.selectable_value(&mut app.edit_kind, k, lang.kind(k));
                                     }
                                 });
                             ui.add_enabled_ui(!app.edit_host.trim().is_empty(), |ui| {
-                                ui.checkbox(&mut app.edit_enabled, "misst").on_hover_text(
-                                    "Aus schaltet die Messung ab, der Verlauf bleibt erhalten",
-                                );
+                                ui.checkbox(&mut app.edit_enabled, lang.measures_checkbox())
+                                    .on_hover_text(lang.tip_measures());
                             });
                         });
 
-                        // Farbe der Linie. Ohne Wahl gibt sie die Palette nach der Position in der
-                        // Liste her; wer hier etwas anfasst, bekommt eine feste Zahl, die auch nach
-                        // einem Neustart und beim Umsortieren dieselbe Farbe ergibt. Der Knopf ist
-                        // gleichzeitig die Vorschau: er zeigt genau den Ton, den das Diagramm malt.
+                        // The line colour. Left alone, the palette hands one out by position in the
+                        // list; touching anything here stores a fixed number that yields the same
+                        // colour after a restart and across re-sorting. The button doubles as the
+                        // preview: it shows exactly the shade the chart paints.
                         let picked = app.edit_color_idx != app::AUTO_COLOR;
                         let shown_idx = if picked { app.edit_color_idx } else { auto_idx };
                         let swatch_name = if picked {
-                            theme::swatch(app.edit_color_idx).name
+                            theme::swatch(app.edit_color_idx).name(lang)
                         } else {
-                            "Auto"
+                            lang.auto_color()
                         };
                         ui.horizontal(|ui| {
                             egui::ComboBox::from_id_salt("edit_color")
@@ -612,7 +634,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                                             .selectable_value(
                                                 &mut app.edit_color_idx,
                                                 n,
-                                                RichText::new(s.name).size(12.0),
+                                                RichText::new(s.name(lang)).size(12.0),
                                             )
                                             .changed()
                                         {
@@ -627,10 +649,8 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             );
                             ui.allocate_at_least(Vec2::new(18.0, 16.0), egui::Sense::hover());
                             if ui
-                                .small_button("Auto")
-                                .on_hover_text(
-                                    "Farbe wieder automatisch nach der Position in der Liste",
-                                )
+                                .small_button(lang.auto_color())
+                                .on_hover_text(lang.tip_color_auto_btn())
                                 .clicked()
                             {
                                 app.edit_color_idx = app::AUTO_COLOR;
@@ -657,29 +677,44 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             RichText::new(format!(
                                 "{} · {}",
                                 kind_label,
-                                if enabled { "aktiv" } else { "pausiert" }
+                                if enabled {
+                                    lang.active()
+                                } else {
+                                    lang.paused()
+                                }
                             ))
                             .weak()
                             .size(11.0),
                         );
                         ui.label(
-                            RichText::new(format!("{}/{} Werte · {}", st.replies, st.total, avg))
-                                .weak()
-                                .size(11.0)
-                                .monospace(),
+                            RichText::new(i18n::fill(
+                                lang.values_span_fmt(),
+                                &[
+                                    ("replies", st.replies.to_string()),
+                                    ("total", st.total.to_string()),
+                                    ("avg", avg.clone()),
+                                ],
+                            ))
+                            .weak()
+                            .size(11.0)
+                            .monospace(),
                         );
                         ui.label(
-                            RichText::new(format!("{} · {} Verluste", span, st.losses))
-                                .weak()
-                                .size(11.0)
-                                .monospace(),
+                            RichText::new(format!(
+                                "{} · {}",
+                                span,
+                                i18n::fill(lang.loss_count_fmt(), &[("n", st.losses.to_string())])
+                            ))
+                            .weak()
+                            .size(11.0)
+                            .monospace(),
                         );
 
                         ui.horizontal(|ui| {
-                            if ui.button("✓ Speichern").clicked() {
+                            if ui.button(lang.save_btn()).clicked() {
                                 edit_action = Some(App::commit_edit);
                             }
-                            if ui.button("✗ Abbrechen").clicked() {
+                            if ui.button(lang.cancel_btn()).clicked() {
                                 edit_action = Some(App::cancel_edit);
                             }
                         });
@@ -725,21 +760,21 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                             ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                         let dot_rect = dot_rect.shrink(1.5);
                         ui.painter().rect_filled(dot_rect, 5.5, color);
-                        // Strich in Linienfarbe: wer die Liste liest, sieht sofort, welche Kurve im
-                        // Diagramm zu diesem Ziel gehört. Der Strich ist gleich hoch wie der Punkt,
-                        // damit beide zusammen eine Zeile bilden und nicht verschoben wirken.
+                        // A dash in the line colour: reading the list, one immediately sees which
+                        // curve in the chart belongs to this target. The dash is as tall as the dot
+                        // so the two form one line instead of looking misaligned.
                         let (line_rect, _) =
                             ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
                         ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
-                        // Was der Strich bedeutet: automatisch oder per Hand gewählte Linienfarbe. Der
-                        // Knauf ist derselbe wie im Diagramm, damit beide Stellen gleichbedeutend sind.
+                        // What the dash means: an automatic or a hand-picked line colour. The knob is
+                        // the same one as in the chart so both places mean the same thing.
                         let knob = Rect::from_center_size(
                             line_rect.center(),
                             Vec2::splat(crate::theme::LEGEND_KNOB),
                         );
                         ui.put(knob, Label::new("").selectable(false))
                             .on_hover_text(&trace_tip);
-                        // Der Strich gehört zum Text: erst der Abstand, dann die Beschriftung.
+                        // The dash belongs to the text: spacing first, then the label.
                         ui.add_space(7.0);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
@@ -748,9 +783,12 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                                     .selectable(false),
                             );
                             let age = if secs_ago < 0.0 {
-                                "noch nicht geprüft".to_string()
+                                lang.not_probed_yet().to_string()
                             } else {
-                                format!("vor {} s", secs_ago.max(0.0) as i64)
+                                i18n::fill(
+                                    lang.ago_fmt(),
+                                    &[("n", (secs_ago.max(0.0) as i64).to_string())],
+                                )
                             };
                             ui.add(
                                 Label::new(
@@ -807,6 +845,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
 }
 
 pub fn bottom(ctx: &egui::Context, app: &mut App) {
+    let lang = app.lang();
     let m = app.theme_mode;
     // Taken out of the app so it can be reused while `app.targets` is borrowed. The old
     // `stats()` window started at the newest sample and had no upper bound.
@@ -822,7 +861,14 @@ pub fn bottom(ctx: &egui::Context, app: &mut App) {
                 let dot = m.run_dot(app.running);
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 4.0, dot);
-                ui.label(RichText::new(if app.running { "läuft" } else { "gestoppt" }).strong());
+                ui.label(
+                    RichText::new(if app.running {
+                        lang.running()
+                    } else {
+                        lang.stopped()
+                    })
+                    .strong(),
+                );
 
                 let mut probed = 0usize;
                 let mut lost = 0usize;
@@ -843,26 +889,32 @@ pub fn bottom(ctx: &egui::Context, app: &mut App) {
                     lost += s.losses;
                 }
                 ui.separator();
-                ui.label(format!("Prüfungen: {}", probed));
+                ui.label(i18n::fill(lang.probes_fmt(), &[("n", probed.to_string())]));
                 ui.label(
-                    RichText::new(format!("Verluste: {}", lost)).color(m.loss_count(lost > 0)),
+                    RichText::new(i18n::fill(lang.losses_fmt(), &[("n", lost.to_string())]))
+                        .color(m.loss_count(lost > 0)),
                 );
-                // Gezählt wird alles, gemerkt nur, was ins Protokoll passt — die beiden Zahlen sind
-                // selten gleich, und eine allein wäre leicht als „so viel ist passiert“ gelesen.
+                // Everything is counted, only what belongs in the protocol is kept — the two numbers
+                // are rarely equal, and one alone would easily be read as "this much happened".
                 if app.log_total > app.log.len() {
-                    ui.label(format!(
-                        "Ereignisse: {} von {}",
-                        app.log.len(),
-                        app.log_total
+                    ui.label(i18n::fill(
+                        lang.events_count_fmt(),
+                        &[
+                            ("n", app.log.len().to_string()),
+                            ("all", app.log_total.to_string()),
+                        ],
                     ));
                 } else {
-                    ui.label(format!("Ereignisse: {}", app.log.len()));
+                    ui.label(i18n::fill(
+                        lang.events_count_short_fmt(),
+                        &[("n", app.log.len().to_string())],
+                    ));
                 }
                 ui.separator();
                 ui.label(RichText::new(&app.status_msg).weak().italics());
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // A8: ab einer Stunde wäre „65:00“ eine Zahl, die man erst umrechnen muss.
+                    // A8: past an hour, "65:00" would be a number one has to convert first.
                     let secs = app.engine.elapsed_secs() as i64;
                     let uptime = if secs >= 3_600 {
                         format!(
@@ -875,28 +927,32 @@ pub fn bottom(ctx: &egui::Context, app: &mut App) {
                         format!("{:02}:{:02}", secs / 60, secs % 60)
                     };
                     ui.label(
-                        RichText::new(format!("Laufzeit {uptime}"))
+                        RichText::new(i18n::fill(lang.uptime_fmt(), &[("t", uptime.clone())]))
                             .monospace()
                             .weak(),
                     );
                     ui.separator();
-                    // A2: die Zustandsdatei schreibt alle 8 s von selbst, ein „Speichern“-Knopf wäre
-                    // ein dritter Weg für dieselbe Sache. Was fehlt, ist die Rückmeldung — also steht
-                    // hier, wann zuletzt gesichert wurde.
+                    // A2: the state file writes itself every 8 s, so a "save" button would be a third
+                    // way to do the same thing. What is missing is the feedback — so this is where
+                    // the time of the last save is shown.
                     let age = app.save_age_secs();
                     let saved = if age < 0.0 {
-                        "noch nicht gesichert".to_string()
+                        lang.not_saved_yet().to_string()
                     } else if age < 20.0 {
-                        format!("gesichert vor {} s", age as i64)
+                        i18n::fill(
+                            lang.saved_secs_ago_fmt(),
+                            &[("n", (age as i64).to_string())],
+                        )
                     } else {
-                        format!("zuletzt vor {} min", age as i64 / 60)
+                        i18n::fill(
+                            lang.saved_min_ago_fmt(),
+                            &[("n", (age as i64 / 60).to_string())],
+                        )
                     };
                     ui.label(RichText::new(saved).weak().size(11.5));
                     if ui
-                        .small_button("CSV")
-                        .on_hover_text(
-                            "Messwerte sofort in den Zustandsordner schreiben und ihn öffnen",
-                        )
+                        .small_button(lang.export_short())
+                        .on_hover_text(lang.tip_export_short())
                         .clicked()
                     {
                         app.quick_export();
@@ -932,6 +988,7 @@ pub fn center_ex(ctx: &egui::Context, app: &mut App, shot_frame: bool) {
 /* ------------------------------------------------------------------ chart */
 
 fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
+    let lang = app.lang();
     let m = app.theme_mode;
     // `shot_frame` means "draw the picture that will be captured", which includes the seeded
     // example history. The clock must come from the same place the samples are stamped with
@@ -945,14 +1002,14 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     let horizon = app.options.horizon_secs as f64;
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Latenzverlauf").strong());
-        // No „Live“ switch here: the top bar has it, and two controls for one state only invite
+        ui.label(RichText::new(lang.chart_heading()).strong());
+        // No "Live" switch here: the top bar has it, and two controls for one state only invite
         // confusion about which one is speaking.
-        if ui.button("◀ zurück").clicked() {
+        if ui.button(lang.back_btn()).clicked() {
             app.follow_live = false;
             app.pan_offset_secs += horizon * 0.25;
         }
-        let back = ui.button("vor ▶");
+        let back = ui.button(lang.forward_btn());
         if back.clicked() {
             app.pan_offset_secs = (app.pan_offset_secs - horizon * 0.25).max(0.0);
             if app.pan_offset_secs < 0.5 {
@@ -960,10 +1017,18 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             }
         }
         ui.separator();
-        if ui.button("⚑ nächste").clicked() {
+        if ui
+            .button(lang.next_btn())
+            .on_hover_text(lang.tip_next_outlier())
+            .clicked()
+        {
             app.jump_to_next_outlier();
         }
-        if ui.button("frühere ⚐").clicked() {
+        if ui
+            .button(lang.earlier_btn())
+            .on_hover_text(lang.tip_earlier())
+            .clicked()
+        {
             app.jump_to_prev_outlier();
         }
         // The id whose visibility a click on its name asked to flip; applied after the loop, when
@@ -976,9 +1041,9 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                 continue;
             }
             let c = app.trace_color(t);
-            // Ein kleiner Farbknopf vor dem Namen, damit die Legende dasselbe Zeichen benutzt wie
-            // die Zielliste: quadratisch, überall gleich groß. Ein ausgeblendetes Ziel zeigt ihn
-            // nur als Umriss — so bleibt erkennbar, welche Farbe es hätte, wenn es wieder da ist.
+            // A small colour knob in front of the name, so the legend uses the same mark as the
+            // target list: square, the same size everywhere. A hidden target shows it as an outline
+            // only — so it stays visible which colour it would have once it is back.
             let (knob_rect, _) = ui
                 .allocate_exact_size(Vec2::splat(crate::theme::LEGEND_KNOB), egui::Sense::hover());
             if t.hidden {
@@ -991,19 +1056,17 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             } else {
                 ui.painter().rect_filled(knob_rect.shrink(1.0), 2.0, c);
             }
-            // Ein Klick auf den Namen blendet genau dieses Ziel ein oder aus — gemessen wird
-            // weiter, nur die Darstellung verschwindet. Der Name bleibt lesbar und schwach, damit
-            // man das ausgeblendete Ziel wiederfindet.
+            // Clicking the name shows or hides exactly this target — measuring continues, only the
+            // drawing disappears. The name stays readable but dim so the hidden target can be found.
             let name = RichText::new(&t.label)
                 .color(if t.hidden { m.text_weak() } else { c })
                 .strong();
             let tip = if t.hidden {
-                format!("{} · ausgeblendet — klicken zum Einblenden", t.host)
+                i18n::fill(lang.tip_legend_hidden_fmt(), &[("host", t.label.clone())])
             } else {
-                format!(
-                    "{} · {} — klicken zum Ausblenden",
-                    t.host,
-                    app.status_text(t)
+                i18n::fill(
+                    lang.tip_legend_shown_fmt(),
+                    &[("host", t.host.clone()), ("status", app.status_text(t))],
                 )
             };
             if ui
@@ -1079,7 +1142,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         let want = (horizon * factor).clamp(5.0, 86_400.0);
         let next = pick_horizon(want);
         if (f64::from(next) - horizon).abs() > f64::EPSILON {
-            // Anchor the cursor's time between old and new window, then clamp at „now“, which is
+            // Anchor the cursor's time between old and new window, then clamp at "now", which is
             // as far right as the plot ever goes.
             let anchor = t_max + u * (f64::from(next) - horizon);
             app.horizon_secs_set(next);
@@ -1096,19 +1159,16 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 
     let t_min = t_max - horizon;
 
-    // B5: Ein leeres Diagramm ist eine Antwort ohne Frage. Ohne Ziel auf dem Bildschirm sagt die
-    // Fläche deshalb, *warum* sie leer ist — Filter, Kategorie oder ausgeblendete Ziele sind drei
-    // verschiedene Knöpfe, an denen man drehen kann.
+    // B5: an empty chart is an answer without a question. With no target on screen, the area says
+    // *why* it is empty — filter, category or hidden targets are three different knobs to turn.
     let shown_count = app.targets.iter().filter(|t| is_shown(app, t)).count();
     if shown_count == 0 && !app.targets.is_empty() {
         let why = if !app.all_kinds_on() {
-            "Alle Kategorien sind über die Schalter oben ausgeblendet."
+            lang.all_kinds_off()
         } else if app.targets.iter().all(|t| t.hidden) {
-            "Alle Ziele sind ausgeblendet — klicke ihren Namen in der Legende an, um sie \
-             zurückzuholen."
+            lang.why_hidden()
         } else {
-            "Kein Ziel passt zum Textfilter oben rechts — mit ✕ oder einem leeren Feld geht es \
-             weiter."
+            lang.why_filter()
         };
         ui.painter().text(
             rect.center(),
@@ -1180,15 +1240,15 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     }
     let scale_top = (y_p95 * 1.15).max(40.0);
 
-    // C4: Welche Messwerte als Ausreißer gelten, hängt an der ganzen Serie des Ziels und ändert
-    // sich nur, wenn ein neuer Wert dazukommt. Die Kurven, die Ringe und die Hover-Anzeige brauchen
-    // denselben Schnitt — also wird er hier einmal pro Frame und Ziel berechnet und in
-    // `cut_scratch` abgelegt (indiziert nach Ziel-Id, damit die Auswertung nicht umsortiert werden
-    // muss). Ein ausgeblendetes Ziel bekommt `f64::MAX`: es hat nichts zu markieren.
+    // C4: which measurements count as outliers depends on the target's whole series and only changes
+    // when a new value arrives. The curves, the rings and the hover read-out need the same cut — so
+    // it is computed once here per frame and target and stored in `cut_scratch` (indexed by target
+    // id, so the read-out never has to re-sort). A hidden target gets `f64::MAX`: it has nothing to
+    // mark.
     {
-        // Index statt Iterator: `is_shown` braucht `app` unverändert, deshalb darf der Vektor nicht
-        // gleichzeitig als mutable Anleihe gehalten werden. Der Schnitt kommt in eine lokale Liste
-        // und wird danach umgehängt.
+        // Index instead of iterator: `is_shown` needs `app` unchanged, so the vector must not be held
+        // as a mutable borrow at the same time. The cut goes into a local list and is swapped in
+        // afterwards.
         let mut cuts = Vec::with_capacity(app.targets.len());
         for t in &app.targets {
             cuts.push(if is_shown(app, t) {
@@ -1213,7 +1273,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         ui.painter().text(
             egui::pos2(rect.left() + 3.0, y - 2.0),
             egui::Align2::LEFT_BOTTOM,
-            format!("{} ms", b as i32),
+            format!("{}{}", b as i32, lang.ms_suffix()),
             FontId::monospace(10.0),
             m.axis_text(),
         );
@@ -1223,7 +1283,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     ui.painter().text(
         egui::pos2(rect.left() + 3.0, rect.top() + 2.0),
         egui::Align2::LEFT_TOP,
-        format!("{:.0} ms", scale_top),
+        format!("{:.0}{}", scale_top, lang.ms_suffix()),
         FontId::monospace(10.0),
         m.axis_text(),
     );
@@ -1334,20 +1394,20 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                     continue;
                 }
                 if let Some(s) = nearest(t, t_at) {
-                    // C4: die Ausreißer-Grenze wird pro Frame und Ziel genau einmal berechnet (siehe
-                    // der Schnitt vor den Kurven) und hier nur noch gelesen.
+                    // C4: the outlier threshold is computed exactly once per frame and target (see the
+                    // cut before the curves) and is only read here.
                     let cut = app.cut_scratch.get(t.id).copied().unwrap_or(f64::MAX);
                     rows.push((
                         format!(
                             "{}  {}{}",
                             t.label,
                             if history::is_ok(s.rtt_ms) {
-                                format!("{:.1} ms", s.rtt_ms)
+                                format!("{:.1}{}", s.rtt_ms, lang.ms_suffix())
                             } else {
-                                "Timeout".into()
+                                lang.timeout_word().to_string()
                             },
                             if (s.rtt_ms as f64) > cut {
-                                "  <- Ausr."
+                                lang.marker_outlier()
                             } else {
                                 ""
                             },
@@ -1405,31 +1465,51 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
 /// status line is for), while the full view starts at the oldest and keeps the position of whoever
 /// reads it — jumping to the bottom on every new event would make a long night unreadable.
 ///
-/// Every row carries the wall clock rather than „+123 s“: the chart counts from program start, so
+/// Every row carries the wall clock rather than "+123 s": the chart counts from program start, so
 /// two windows open at different times would disagree about when an outage happened. The same
 /// conversion as the CSV export is used, which makes a log line and a CSV line the same fact.
 fn event_log(ui: &mut Ui, app: &mut App, max_height: f32) {
+    let lang = app.lang();
     let m = app.theme_mode;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Ereignisse").strong());
-        // Gezählt wird alles, gemerkt nur, was ins Protokoll passt — sonst liest man die Länge der
-        // Liste als „so viel ist passiert“.
+        ui.label(RichText::new(lang.events()).strong());
+        // Everything is counted, only what belongs in the protocol is kept — otherwise one reads the
+        // length of the list as "this much happened".
         if app.log_total > app.log.len() {
-            ui.label(RichText::new(format!("{} von {}", app.log.len(), app.log_total)).weak());
+            ui.label(
+                RichText::new(i18n::fill(
+                    lang.log_count_fmt(),
+                    &[
+                        ("n", app.log.len().to_string()),
+                        ("all", app.log_total.to_string()),
+                    ],
+                ))
+                .weak(),
+            );
         } else {
-            ui.label(RichText::new(format!("({})", app.log.len())).weak());
+            ui.label(
+                RichText::new(i18n::fill(
+                    lang.log_count_paren_fmt(),
+                    &[("n", app.log.len().to_string())],
+                ))
+                .weak(),
+            );
         }
-        // A7: nach einer langen Nacht will man die Störfälle sehen, nicht jede Meldung. Gefiltert
-        // wird nur die Ansicht — „leeren“ bliebe sonst der einzige Weg einzugrenzen.
+        // A7: after a long night one wants the incidents, not every message. Only the view is
+        // filtered — otherwise "clear" would remain the only way to narrow things down.
         let only_bad = app.log_only_outages;
         let filt = ui
-            .selectable_label(only_bad, selectable_text("nur Störungen", ""))
-            .on_hover_text("Nur Ausfälle und Wiederherstellungen zeigen")
+            .selectable_label(only_bad, selectable_text(lang.only_problems(), ""))
+            .on_hover_text(lang.tip_only_problems())
             .clicked();
         if filt {
             app.log_only_outages = !only_bad;
         }
-        if ui.small_button("leeren").clicked() {
+        if ui
+            .small_button(lang.clear_log_btn())
+            .on_hover_text(lang.tip_clear_log())
+            .clicked()
+        {
             app.log.clear();
             app.log_total = 0;
         }
@@ -1456,9 +1536,9 @@ fn event_log(ui: &mut Ui, app: &mut App, max_height: f32) {
                     )
                     .selectable(false),
                 );
-                // A7: die Meldung und der Verlauf an einem Ort. Ein Doppelklick auf eine Störungs-
-                // zeile holt das Diagrammfenster auf diesen Zeitpunkt — sonst sitzt man in der Liste,
-                // liest „Ausfall um 03:12“ und muss erst suchen, wo das war.
+                // A7: the message and its history in one place. Double-clicking an outage line pulls
+                // the chart window onto that moment — otherwise one sits in the list, reads "outage
+                // at 03:12" and has to find where that was first.
                 if e.kind != LogKind::Info && row.double_clicked() {
                     jump = Some(e.secs);
                 }
@@ -1469,10 +1549,8 @@ fn event_log(ui: &mut Ui, app: &mut App, max_height: f32) {
     }
 }
 
-/// Column widths for the statistics grid: Ziel, Host, Status, Min, Ø, Median,
-/// p95, Max, Verlust, Ausr.
-/// Column widths of the statistics table: Ziel, Host, Status, Schnitt, Min, Letzter, P95, Max,
-/// Ausfälle, Verlust. The first two hold names and addresses, which are what actually gets long;
+/// Column widths of the statistics table: Target, Host, Status, Probe, Min, Last, P95, Max,
+/// Outages, Loss. The first two hold names and addresses, which are what actually gets long;
 /// the numbers are fixed-width monospace, so they only need room for the header word.
 fn column_widths() -> [f32; 10] {
     [200.0, 150.0, 84.0, 64.0, 64.0, 72.0, 64.0, 64.0, 72.0, 56.0]
@@ -1553,16 +1631,17 @@ pub fn fmt_axis(secs: f64, horizon: f64, clock: Option<i64>) -> String {
 /* ------------------------------------------------------------------- list */
 
 fn events_view(ui: &mut Ui, app: &mut App) {
+    let lang = app.lang();
     let m = app.theme_mode;
-    ui.label(RichText::new("Statusliste").strong());
+    ui.label(RichText::new(lang.status_list()).strong());
     ui.add_space(4.0);
     let now = app.engine.elapsed_secs();
     // Taken out of the app so it can be reused while `app.targets` is borrowed.
     let mut scratch = std::mem::take(&mut app.stats_scratch);
-    // B3: geklickt werden kann nur, was schon gezeichnet ist — also die Id merken und nach der
-    // Schleife auflösen.
+    // B3: only what has already been drawn can be clicked — so remember the id and act after the
+    // loop unwinds.
     let mut unhide_id: Option<usize> = None;
-    // B5: auch hier ist „keine Zeile“ eine Antwort, die erklärt sein will.
+    // B5: here too, "no rows" is an answer that wants explaining.
     if app.targets.iter().filter(|t| app.shown(t)).count() == 0 {
         ui.label(RichText::new(weak_note(app)));
     }
@@ -1570,8 +1649,8 @@ fn events_view(ui: &mut Ui, app: &mut App) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for idx in 0..app.targets.len() {
-                // A1/B2: was im Diagramm nicht zu sehen ist, fehlt auch hier nicht — es wird
-                // schwächer geschrieben und bleibt so als Beweis des Ausblendens stehen.
+                // A1/B2: what the chart does not show is not missing here either — it is written more
+                // quietly and stays as the proof that it was hidden.
                 let shown = app.shown(&app.targets[idx]);
                 if !shown && !app.targets[idx].hidden {
                     continue;
@@ -1594,12 +1673,12 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                     .inner_margin(egui::Margin::symmetric(10, 8));
                 let r = frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        // B3: wer ausgeblendet ist, kann hier ebenso zurückgeholt werden wie über
-                        // die Legende — der Aufwärts-Punkt neben dem Namen tut es.
+                        // B3: a hidden target can be brought back here just as well as through the
+                        // legend — the up-arrow dot next to the name does it.
                         if app.targets[idx].hidden
                             && ui
                                 .small_button(RichText::new("◉").color(m.text_dim()))
-                                .on_hover_text("Ziel wieder anzeigen")
+                                .on_hover_text(lang.tip_show_target())
                                 .clicked()
                         {
                             unhide_id = Some(app.targets[idx].id);
@@ -1607,20 +1686,20 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 6.0, color);
-                        // Strich in Linienfarbe, wie in der Zielliste links.
+                        // A dash in the line colour, like in the target list on the left.
                         let (line_rect, _) =
                             ui.allocate_exact_size(Vec2::new(18.0, 14.0), egui::Sense::hover());
                         ui.painter().rect_filled(line_rect.shrink(5.0), 2.0, trace);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
-                            // B2: derselbe Name, dieselbe Stelle — nur deutlich leiser als alles,
-                            // was gerade gemessen wird. Der Grund steht daneben, nicht im Tooltip.
+                            // B2: same name, same place — just much quieter than everything being
+                            // measured right now. The reason sits next to it, not in a tooltip.
                             let mut name = format!("{}   ({})", t.label, t.host);
                             if !shown {
                                 name.push_str(if t.hidden {
-                                    "  · ausgeblendet"
+                                    lang.hidden_suffix()
                                 } else {
-                                    "  · gefiltert"
+                                    lang.filtered_suffix()
                                 });
                             }
                             ui.add(
@@ -1632,15 +1711,18 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                                 .selectable(false),
                             );
                             let age = if secs_ago < 0.0 {
-                                "wartet".to_string()
+                                lang.waiting_short().to_string()
                             } else {
-                                format!("vor {:.0} s", secs_ago.max(0.0))
+                                i18n::fill(
+                                    lang.ago_fmt(),
+                                    &[("n", secs_ago.max(0.0).round().to_string())],
+                                )
                             };
                             ui.add(
                                 Label::new(
                                     RichText::new(format!(
                                         "{} · {} · {}",
-                                        t.kind.label(),
+                                        lang.kind(t.kind),
                                         age,
                                         crate::app::fmt_ms(t.last_rtt)
                                     ))
@@ -1663,19 +1745,25 @@ fn events_view(ui: &mut Ui, app: &mut App) {
                     draw_sparkline(ui, &t.series, bar, trace);
                     ui.add(
                         Label::new(
-                            RichText::new(format!(
-                                "min {} · Ø {} · p95 {} · max {} · Verlust {:.1} %{}",
-                                crate::app::fmt_ms(st.min),
-                                crate::app::fmt_ms(st.avg as f32),
-                                crate::app::fmt_ms(st.p95),
-                                crate::app::fmt_ms(st.max),
-                                st.loss_pct,
+                            RichText::new({
+                                let mut line = i18n::fill(
+                                    lang.stats_line_fmt(),
+                                    &[
+                                        ("min", crate::app::fmt_ms(st.min)),
+                                        ("avg", crate::app::fmt_ms(st.avg as f32)),
+                                        ("p95", crate::app::fmt_ms(st.p95)),
+                                        ("max", crate::app::fmt_ms(st.max)),
+                                        ("loss", format!("{:.1}", st.loss_pct)),
+                                    ],
+                                );
                                 if st.outliers > 0 {
-                                    format!(" · {} Ausr.", st.outliers)
-                                } else {
-                                    String::new()
+                                    line.push_str(&i18n::fill(
+                                        lang.outliers_suffix_fmt(),
+                                        &[("n", st.outliers.to_string())],
+                                    ));
                                 }
-                            ))
+                                line
+                            })
                             .weak()
                             .size(11.0),
                         )
@@ -1695,13 +1783,13 @@ fn events_view(ui: &mut Ui, app: &mut App) {
 
 /// Why nothing is shown, in one sentence — the same three causes in every view that can go empty.
 fn weak_note(app: &App) -> String {
+    let lang = app.lang();
     if !app.all_kinds_on() {
-        "Alle Kategorien sind über die Schalter oben ausgeblendet.".to_string()
+        lang.all_kinds_off().to_string()
     } else if app.targets.iter().all(|t| t.hidden) {
-        "Alle Ziele sind ausgeblendet — in der Legende des Diagramms holen sie ihre Namen zurück."
-            .to_string()
+        lang.all_targets_hidden().to_string()
     } else {
-        "Kein Ziel passt zum Textfilter oben rechts.".to_string()
+        lang.filter_no_match().to_string()
     }
 }
 
@@ -1713,9 +1801,9 @@ fn draw_sparkline(ui: &Ui, series: &history::Series, rect: egui::Rect, color: Co
     }
     let t0 = samples[0].t_secs;
     let t1 = samples.last().map(|s| s.t_secs).unwrap_or(t0 + 1.0);
-    // C2: eine Sparkline ist 16 px hoch und sagt nur „ruhig“ oder „bewegt sich das“. Ein einzelner
-    // Ausreißer von 900 ms drückt alles andere auf eine gerade Linie — deshalb endet die Achse beim
-    // p95 der Serie, mindestens aber bei 40 ms. Was darüber liegt, bleibt als Ring sichtbar.
+    // C2: a sparkline is 16 px tall and only says "calm" or "is something moving here". A single
+    // 900 ms outlier squashes everything else into a flat line — so the axis ends at the series' p95,
+    // but never below 40 ms. What lies above it stays visible as a ring.
     let (cut, _n) = history::outlier_cut(samples);
     let mut y_max = 40.0f32;
     for s in samples {
@@ -1759,7 +1847,7 @@ fn draw_sparkline(ui: &Ui, series: &history::Series, rect: egui::Rect, color: Co
 /* ------------------------------------------------------------------ stats */
 
 /// Which statistics column a header click sorts by. `pub` and named after the table's own columns so
-/// the header, the arrow and [`App::sort_targets`] cannot disagree about what „p95“ means.
+/// the header, the arrow and [`App::sort_targets`] cannot disagree about what "p95" means.
 fn sort_column(n: usize) -> Option<app::SortColumn> {
     Some(match n {
         0 => app::SortColumn::Label,
@@ -1776,8 +1864,9 @@ fn sort_column(n: usize) -> Option<app::SortColumn> {
 }
 
 fn stats_view(ui: &mut Ui, app: &mut App) {
+    let lang = app.lang();
     let m = app.theme_mode;
-    ui.label(RichText::new("Statistiken").strong());
+    ui.label(RichText::new(lang.stats_heading()).strong());
     ui.add_space(6.0);
 
     // The targets to list are looked up once, so the row count and the row lookup agree. Hidden
@@ -1791,8 +1880,8 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
     // Plain grid instead of egui_extras' table: the look stays the same (header row,
     // one row per target) without pulling in another crate.
     //
-    // B4/C6: every column header is a button. The first click sorts descending — „die schlechtesten
-    // zuerst“, because that is what one looks for in a latency table — and the second reverses it.
+    // B4/C6: every column header is a button. The first click sorts descending — "the worst
+    // first", because that is what one looks for in a latency table — and the second reverses it.
     // The arrow is painted next to the word rather than replacing it, so an unsorted table still
     // says what each column would do.
     let mut sort_click: Option<(app::SortColumn, bool)> = None;
@@ -1800,12 +1889,19 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
     ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            for (n, c) in [
-                "Ziel", "Host", "Status", "Min", "Ø", "Median", "p95", "Max", "Verlust", "Ausr.",
-            ]
-            .iter()
-            .enumerate()
-            {
+            let headers = [
+                lang.col_target(),
+                lang.col_host(),
+                lang.col_status(),
+                lang.col_min(),
+                lang.col_avg(),
+                lang.col_median(),
+                lang.col_p95(),
+                lang.col_max(),
+                lang.col_loss(),
+                lang.col_outliers(),
+            ];
+            for (n, c) in headers.iter().enumerate() {
                 let col = sort_column(n);
                 let arrow = match (&app.sort, col) {
                     (Some(s), Some(col)) if s.column == col => {
@@ -1823,9 +1919,8 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
                         .selectable(false),
                 );
                 if let Some(col) = col {
-                    btn.clone().on_hover_text(format!(
-                        "Nach {c} sortieren — nochmaliger Klick kehrt die Richtung um"
-                    ));
+                    btn.clone()
+                        .on_hover_text(i18n::fill(lang.tip_sort_fmt(), &[("c", (*c).to_string())]));
                     if btn.clicked() {
                         let descending = match &app.sort {
                             Some(s) if s.column == col => !s.descending,
@@ -1846,7 +1941,7 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
             .show(ui, |ui| {
                 for &idx in &ids {
                     let t = &app.targets[idx];
-                    // C3: dieselbe Rechnung wie links in der Liste und unten in der Gesamt-Zeile.
+                    // C3: the same computation as in the list on the left and in the totals row below.
                     let st = app.stats_for(t, &mut scratch);
                     let color = app.status_color(t);
                     let trace = app.trace_color(t);
@@ -1854,7 +1949,7 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
                     let sel = app.selected == idx;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
-                        // Farbstrich vor dem Namen: dieselbe Farbe wie die Linie im Diagramm.
+                        // Colour dash in front of the name: the same colour as the line in the chart.
                         let (line_rect, _) =
                             ui.allocate_exact_size(Vec2::new(14.0, 20.0), egui::Sense::hover());
                         ui.painter().rect_filled(line_rect.shrink(6.0), 1.5, trace);
@@ -1932,22 +2027,22 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
 
     ui.add_space(10.0);
     ui.separator();
-    // D4: „Gesamt“ ist keine Summe der Zeilen, sondern dieselbe Rechnung wie pro Ziel — nur über
-    // alle Antworten der Auswahl hinweg. Median und p95 zweier Ziele zu mitteln ergäbe eine Latenz,
-    // die kein Ziel gemessen hat; also sammelt `stats_total` alle Antworten in einen Puffer und zieht
-    // die Perzentile daraus.
+    // D4: "Total" is not a sum of the rows but the same computation as per target — just over every
+    // reply in the selection. Averaging the median and p95 of two targets would give a latency no
+    // target ever measured, so `stats_total` collects all replies into one buffer and draws the
+    // percentiles from it.
     let mut all = std::mem::take(&mut app.all_rtt_scratch);
     let mut scratch = std::mem::take(&mut app.stats_scratch);
     let st = app.stats_total(&mut scratch, &mut all);
     app.stats_scratch = scratch;
     app.all_rtt_scratch = all;
-    // Eine Spalte ohne Messwert ist „—“ und nicht 0: ein Ziel, das nie geantwortet hat, hat keine
-    // Latenz, und eine Null in einer Latenzspalte wäre eine Aussage, die nicht stimmt.
+    // A column without a measurement shows "—" and not 0: a target that never answered has no
+    // latency, and a zero in a latency column would be a claim that is not true.
     let num = |v: f32| {
         if v.is_finite() && st.replies > 0 {
             crate::app::fmt_ms(v)
         } else {
-            "—".to_string()
+            lang.dash().to_string()
         }
     };
     ui.horizontal(|ui| {
@@ -1956,9 +2051,12 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
         ui.add_sized(
             [widths[0] + widths[1] + widths[2], 20.0],
             Label::new(
-                RichText::new(format!("Gesamt · {} Prüfungen", st.total))
-                    .strong()
-                    .size(12.0),
+                RichText::new(i18n::fill(
+                    lang.total_probes_fmt(),
+                    &[("n", st.total.to_string())],
+                ))
+                .strong()
+                .size(12.0),
             )
             .selectable(false),
         );
@@ -1967,7 +2065,7 @@ fn stats_view(ui: &mut Ui, app: &mut App) {
             if st.replies > 0 {
                 crate::app::fmt_ms(st.avg as f32)
             } else {
-                "—".to_string()
+                lang.dash().to_string()
             },
             num(st.median),
             num(st.p95),
@@ -2018,368 +2116,458 @@ fn pick_horizon(secs: f64) -> f32 {
         .unwrap_or(60.0)
 }
 
+/// One preset window, translated: the ladder itself stays language-independent because it is stored
+/// in seconds and matched by value, only what the control says about it follows `lang`.
+fn horizon_choice_label(lang: Lang, c: &app::HorizonChoice) -> String {
+    let secs = c.secs;
+    if (secs - secs.round()).abs() < f32::EPSILON {
+        let n = secs as i64;
+        if n % 3_600 == 0 {
+            return format!("{} {}", n / 3_600, lang.hours_unit());
+        }
+        if n >= 60 {
+            return format!("{} {}", n / 60, lang.minutes_unit());
+        }
+        return format!("{n} {}", lang.seconds_unit());
+    }
+    format!("{secs:.1} {}", lang.seconds_unit())
+}
+
 /// The label of the current window length, and a fallback for a value from an older file that
 /// is not one of the presets.
-fn horizon_label(secs: f32) -> String {
+fn horizon_label(lang: Lang, secs: f32) -> String {
     app::HORIZON_CHOICES
         .iter()
         .find(|c| c.secs == secs)
-        .map(|c| String::from(c.label))
-        .unwrap_or_else(|| format!("{secs:.0} s"))
+        .map(|c| horizon_choice_label(lang, c))
+        .unwrap_or_else(|| format!("{secs:.0} {}", lang.seconds_unit()))
 }
 
 /// What a window length means in practice: how many values it holds and how much memory that
 /// is per target. A day is the first choice where the number is worth showing.
-fn horizon_hint(secs: f32) -> String {
+fn horizon_hint(lang: Lang, secs: f32) -> String {
     let samples = app::samples_for_horizon(secs, 1.0);
     if secs < 3_600.0 {
-        String::from("das Diagramm zeigt diesen Zeitraum")
+        lang.horizon_hint_chart().to_string()
     } else {
         let mib =
             samples as f64 * std::mem::size_of::<history::Sample>() as f64 / (1024.0 * 1024.0);
-        format!("rund {samples} Messwerte pro Ziel ({mib:.1} MiB) bei 1 s Abstand")
+        i18n::fill(
+            lang.samples_capacity_fmt(),
+            &[
+                ("n", samples.to_string()),
+                ("mib", format!("{mib:.1}")),
+                ("interval", app::interval_label(lang, 1.0)),
+            ],
+        )
     }
 }
 
 fn settings(ui: &mut Ui, app: &mut App) {
+    let lang = app.lang();
     let mut dirty = false;
     let m = app.theme_mode;
-    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.group(|ui| {
-            ui.label(RichText::new("Prüfung").strong());
-            ui.add_space(4.0);
-            // Das Intervall hat seinen Regler oben in der Leiste und wird von dort gespeichert;
-            // ein zweiter Regler für dieselbe Zahl war nur eine zweite Gelegenheit, sich zu
-            // wundern, wo man es gerade geändert hat.
-            ui.label(
-                RichText::new(format!(
-                    "Intervall: {:.2} s — oben in der Leiste einzustellen",
-                    app.options.interval_secs
-                ))
-                .weak(),
-            );
-            ui.horizontal(|ui| {
-                ui.label("Zeitüberschreitung");
-                if ui.add(egui::DragValue::new(&mut app.options.timeout_ms).range(200..=10_000).suffix(" ms").speed(50)).changed() { dirty = true; }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Gleichzeitige Prüfungen");
-                if ui.add(egui::DragValue::new(&mut app.options.concurrency).range(1..=32)).changed() { dirty = true; }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Zeitfenster");
-                // Die Voreinstellungen reichen bis 24 h. Ein Schieberegler wäre hier falsch:
-                // zwischen 15 s und einem Tag sieht man den Unterschied von Minuten nicht.
-                egui::ComboBox::from_id_salt("horizon")
-                    .selected_text(horizon_label(app.options.horizon_secs))
-                    .show_ui(ui, |ui| {
-                        for c in app::HORIZON_CHOICES {
-                            if ui
-                                .selectable_value(&mut app.options.horizon_secs, c.secs, c.label)
-                                .on_hover_text(horizon_hint(c.secs))
-                                .changed()
-                            {
-                                dirty = true;
-                            }
-                        }
-                    });
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.group(|ui| {
+                ui.label(RichText::new(lang.measuring()).strong());
+                ui.add_space(4.0);
+                // The interval has its slider up in the top bar and is saved from there; a second slider
+                // for the same number was just a second chance to wonder where it was changed.
                 ui.label(
-                    RichText::new(horizon_hint(app.options.horizon_secs))
-                        .weak()
-                        .size(11.5),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Max. Messwerte je Ziel");
-                // Ein Tag bei einer Sekunde Abstand sind 86 400 Werte pro Ziel. Die Obergrenze
-                // richtet sich deshalb nach dem Zeitfenster statt nach einem festen Maximum.
-                let cap = app::effective_max_samples(&app.options);
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut app.options.max_samples)
-                            .range(0..=cap)
-                            .speed(256)
-                            .custom_formatter(|v, _| {
-                                if v == 0.0 {
-                                    String::from("auto")
-                                } else {
-                                    format!("{}", v as usize)
-                                }
-                            }),
-                    )
-                    .on_hover_text(format!(
-                        "0 = automatisch ({} für das aktuelle Fenster). Obergrenze ist das \
-                         Zehnfache des Fensters bei {} s Abstand.",
-                        app::samples_for_horizon(app.options.horizon_secs, app.options.interval_secs),
-                        app.options.interval_secs
+                    RichText::new(i18n::fill(
+                        lang.interval_now_fmt(),
+                        &[("n", app::interval_label(lang, app.options.interval_secs))],
                     ))
-                    .changed()
-                {
-                    dirty = true;
-                }
-            });
-        });
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label(RichText::new("Start").strong());
-            ui.add_space(4.0);
-            // A3: Ton, Infobereich und minimierter Start waren als Knöpfe zu sehen, obwohl das
-            // Programm nichts davon tut. Die Felder bleiben in der Datei für die, die es
-            // umsetzen; ein Knopf, der nichts bewirkt, ist schlimmer als kein Knopf.
-            ui.horizontal(|ui| {
-                let on = app.autostart_state() == Some(true);
-                let mut v = on;
-                if ui.checkbox(&mut v, "Beim Anmelden starten (Windows)").changed() {
-                    app.set_autostart(v);
-                }
-                if app.autostart_state() == Some(false) {
-                    ui.label(RichText::new("Autostart nicht möglich").color(app.theme_mode.warn()));
-                }
-            });
-        });
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            // A6: ein Ziel anlegen heißt heute drei Knöpfe suchen — Spalte, „+“, Kategorie. Hier
-            // gehören Name und Adresse hin, und die Kategorie entscheidet sich von selbst.
-            ui.label(RichText::new("Ziele").strong());
-            ui.add_space(4.0);
-            let mut add: Option<(String, String)> = None;
-            // Die Felder werden für den Frame aus der App genommen und am Ende zurückgelegt —
-            // sonst schreibt egui jeden Frame leere Strings hinein und die Eingabe verschwindet.
-            let mut pending_host: Option<String> = None;
-            let mut pending_label: Option<String> = None;
-            let mut drop_host = false;
-            let mut drop_label = false;
-            let host_id = ui.id().with(SETTINGS_HOST_ID_SALT);
-            let label_id = ui.id().with(SETTINGS_LABEL_ID_SALT);
-            let mut take = |id: egui::Id| {
-                app.settings_target_ids
-                    .remove(&id)
-                    .unwrap_or_default()
-            };
-            let host_key = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.horizontal(|ui| {
-                let mut host = take(host_id);
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut host)
-                            .hint_text("Adresse, z. B. 8.8.8.8")
-                            .desired_width(200.0),
-                    )
-                    .changed()
-                {
-                    pending_host = Some(host.clone());
-                }
-                let mut label = take(label_id);
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut label)
-                            .hint_text("Name (leer = Adresse)")
-                            .desired_width(160.0),
-                    )
-                    .changed()
-                {
-                    pending_label = Some(label.clone());
-                }
-                // Enter im Adressfeld genügt — die Adresse ist das, was man zuerst tippt.
-                if (ui.button("Hinzufügen").clicked() || host_key) && !host.trim().is_empty() {
-                    add = Some((host.trim().to_string(), label.trim().to_string()));
-                    drop_host = true;
-                    drop_label = true;
-                }
-            });
-            if let Some(host) = pending_host {
-                app.settings_target_ids.insert(host_id, host);
-            }
-            if let Some(label) = pending_label {
-                app.settings_target_ids.insert(label_id, label);
-            }
-            if drop_host {
-                app.settings_target_ids.remove(&host_id);
-            }
-            if drop_label {
-                app.settings_target_ids.remove(&label_id);
-            }
-            if let Some((host, label)) = add {
-                // Ein neues Ziel wird auch gleich gemessen — sonst steht es als leere Zeile da und
-                // der erste Eindruck ist eine Null.
-                app.add_suggested_target(&host, &label);
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Vorschläge:").weak().size(11.5));
-                for (host, label) in [
-                    ("8.8.8.8", "Google DNS"),
-                    ("1.1.1.1", "Cloudflare"),
-                    ("9.9.9.9", "Quad9"),
-                    ("224.0.0.1", "Multicast"),
-                ] {
+                    .weak(),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(lang.timeout_label());
                     if ui
-                        .small_button(label)
-                        .on_hover_text(format!("{host} hinzufügen und sofort messen"))
-                        .clicked()
-                    {
-                        app.add_suggested_target(host, label);
-                    }
-                }
-            });
-        });
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label(RichText::new("Darstellung").strong());
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Farbschema");
-                for (value, label) in [
-                    ("system", "System"),
-                    ("light", "Hell"),
-                    ("dark", "Dunkel"),
-                ] {
-                    let on = app.options.theme == value;
-                    if ui.selectable_label(on, label).clicked() {
-                        app.options.theme = String::from(value);
-                        dirty = true;
-                    }
-                }
-            });
-            ui.label(
-                RichText::new("„System“ folgt der Hell-/Dunkel-Einstellung von Windows und wechselt sofort.")
-                    .weak()
-                    .size(11.5),
-            );
-        });
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            // Früher stand hier eine eigene Gruppe „Ziel“ mit „Ziel entfernen“ und „Prüfung
-            // zurücksetzen“. Das Entfernen passiert jetzt am Ziel selbst (Inline-Editor), und ein
-            // Knopf, der das gerade markierte Ziel traf, war zu leicht misszuverstehen.
-            ui.label(RichText::new("Daten").strong());
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .button("CSV exportieren")
-                    .on_hover_text("Schreibt in den Ordner der gespeicherten Einstellungen")
-                    .clicked()
-                {
-                    let path = default_export_path();
-                    app.export_csv(path);
-                }
-                if ui
-                    .button("Speichern unter…")
-                    .on_hover_text("Ordner und Dateiname selbst wählen")
-                    .clicked()
-                {
-                    app.open_export_dialog();
-                }
-                // A2: kein „Speichern“-Knopf — es wird ohnehin bei jeder Änderung geschrieben, was
-                // der Knopf also verspricht, stimmt nicht. Die Statusleiste sagt jetzt, wann.
-                // Betrifft alle Ziele — deshalb sagt der Knopf das auch. Ein offener Editor wird
-                // vorher übernommen, sonst verschwinden die Werte unter den offenen Eingaben weg.
-                // Weil sich der Verlauf nicht zurückholen lässt, will der Knopf zwei Klicks: der
-                // erste scharft ihn nur an und fragt nach, der zweite löscht. Nach ein paar Sekunden
-                // verfängt sich die Nachfrage wieder, sonst löscht ein vergessener Warnhinweis.
-                let clear_label = if app.clear_armed {
-                    "Wirklich löschen?"
-                } else {
-                    "Messwerte löschen"
-                };
-                let clear_btn = ui.button(RichText::new(clear_label).color(if app.clear_armed {
-                    m.danger_text()
-                } else {
-                    Color32::from_rgb(150, 150, 150)
-                }));
-                // `on_hover_text` consumes the response, so both arms of the choice have to be
-                // written as one expression that hands the (unchanged) response back.
-                let clear_btn = if app.clear_armed {
-                    clear_btn.on_hover_text("Nochmal klicken: Verlauf und Statistik aller Ziele löschen.")
-                } else {
-                    clear_btn.on_hover_text(
-                        "Verlauf und Statistik aller Ziele leeren. Die Ziele selbst bleiben erhalten. Zwei Klicks nötig.",
-                    )
-                };
-                if clear_btn.clicked() {
-                    if app.clear_armed {
-                        // Second click within the window: do it.
-                        app.clear_armed = false;
-                        app.clear_at = None;
-                        app.close_edit();
-                        app.reset_stats();
-                    } else {
-                        app.clear_armed = true;
-                        app.clear_at = Some(std::time::Instant::now());
-                    }
-                }
-                ui.label(RichText::new("Einstellungen und Verlauf werden automatisch gesichert.").weak().size(11.5));
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut app.options.protocol_log, "Protokoll-Datei schreiben")
-                    .on_hover_text("Jede Messung wird sofort in eine Datei geschrieben, nicht erst beim Export.")
-                    .changed()
-                {
-                    let format = crate::exporter::ProtocolFormat::from_path(&app.options.protocol_path);
-                    app.set_protocol(app.options.protocol_log, format);
-                    dirty = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(app.options.protocol_log, |ui| {
-                    let mut path = app.options.protocol_path.clone();
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut path).hint_text("Standard: neben den gespeicherten Daten (protocol.csv)").desired_width(300.0))
+                        .add(
+                            egui::DragValue::new(&mut app.options.timeout_ms)
+                                .range(200..=10_000)
+                                .suffix(" ms")
+                                .speed(50),
+                        )
                         .changed()
                     {
-                        app.set_protocol(true, crate::exporter::ProtocolFormat::from_path(&path));
-                        app.options.protocol_path = path;
+                        dirty = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(lang.concurrency_label());
+                    if ui
+                        .add(egui::DragValue::new(&mut app.options.concurrency).range(1..=32))
+                        .changed()
+                    {
+                        dirty = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(lang.horizon_label_text());
+                    // The presets reach up to 24 h. A slider would be wrong here: between 15 s and a day,
+                    // the difference of a few minutes is not visible.
+                    egui::ComboBox::from_id_salt("horizon")
+                        .selected_text(horizon_label(lang, app.options.horizon_secs))
+                        .show_ui(ui, |ui| {
+                            for c in app::HORIZON_CHOICES {
+                                if ui
+                                    .selectable_value(
+                                        &mut app.options.horizon_secs,
+                                        c.secs,
+                                        horizon_choice_label(lang, c),
+                                    )
+                                    .on_hover_text(horizon_hint(lang, c.secs))
+                                    .changed()
+                                {
+                                    dirty = true;
+                                }
+                            }
+                        });
+                    ui.label(
+                        RichText::new(horizon_hint(lang, app.options.horizon_secs))
+                            .weak()
+                            .size(11.5),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(lang.max_samples_label());
+                    // A day at one-second spacing is 86,400 values per target. The cap therefore follows
+                    // the time window rather than a fixed maximum.
+                    let cap = app::effective_max_samples(&app.options);
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut app.options.max_samples)
+                                .range(0..=cap)
+                                .speed(256)
+                                .custom_formatter(|v, _| {
+                                    if v == 0.0 {
+                                        String::from("auto")
+                                    } else {
+                                        format!("{}", v as usize)
+                                    }
+                                }),
+                        )
+                        .on_hover_text(i18n::fill(
+                            lang.tip_max_samples_fmt(),
+                            &[
+                                (
+                                    "n",
+                                    app::samples_for_horizon(
+                                        app.options.horizon_secs,
+                                        app.options.interval_secs,
+                                    )
+                                    .to_string(),
+                                ),
+                                (
+                                    "interval",
+                                    app::interval_label(lang, app.options.interval_secs),
+                                ),
+                            ],
+                        ))
+                        .changed()
+                    {
                         dirty = true;
                     }
                 });
             });
-            ui.add_space(4.0);
-        });
 
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            // B1/C5: Kürzel, die nirgends nachzulesen sind, existieren nicht. Was hier steht, ist
-            // dieselbe Liste, die in der Leiste unter den Knöpfen steht.
-            ui.label(RichText::new("Tastatur").strong());
-            ui.add_space(4.0);
-            for (keys, what) in [
-                ("1 – 4", "Diagramm / Messwerte / Ereignisse / Einstellungen"),
-                ("Leertaste", "Alle Ziele starten oder anhalten"),
-                ("Esc", "Editor schließen, sonst zurück ins Live-Bild"),
-                ("← / →", "Zeitfenster eine halbe Breite weit schieben"),
-                ("Mausrad im Diagramm", "Zoomen, der Cursor bleibt dieselbe Zeit"),
-                ("Doppelklick im Diagramm", "Zurück zum laufenden Betrieb"),
-                ("Doppelklick in der Liste", "Zum Ausschlag springen"),
-            ] {
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                ui.label(RichText::new(lang.start_group()).strong());
+                ui.add_space(4.0);
+                // A3: sound, tray icon and starting minimised were shown as buttons although the program
+                // does none of those things. The fields stay in the file for whoever implements them; a
+                // button that does nothing is worse than no button.
                 ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [180.0, 18.0],
-                        Label::new(RichText::new(keys).monospace().size(12.0)).selectable(false),
-                    );
-                    ui.label(RichText::new(what).size(12.0));
+                    let on = app.autostart_state() == Some(true);
+                    let mut v = on;
+                    if ui.checkbox(&mut v, lang.autostart_checkbox()).changed() {
+                        app.set_autostart(v);
+                    }
+                    if app.autostart_state() == Some(false) {
+                        ui.label(
+                            RichText::new(lang.autostart_blocked()).color(app.theme_mode.warn()),
+                        );
+                    }
                 });
-            }
-        });
+            });
 
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label(RichText::new("Info").strong());
-            ui.label(RichText::new(concat!(
-                "System-Ping Open Source — ein Latenz-Monitor, von Grund auf neu geschrieben.\n",
-                "Die Prüfungen laufen über das System-Werkzeug \"ping\" in einem eigenen\n",
-                "Arbeiterpool, damit die Oberfläche nie blockiert. Der Verlauf wird lokal\n",
-                "als JSON gesichert und kann als CSV exportiert werden. Eine optionale\n",
-                "Protokoll-Datei schreibt jeden Messwert sofort fortlaufend mit."
-            )).weak().size(11.5));
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                // A6: creating a target used to mean finding three controls — the column, the "+", the
+                // category. Name and address belong here, and the category decides itself.
+                ui.label(RichText::new(lang.targets()).strong());
+                ui.add_space(4.0);
+                let mut add: Option<(String, String)> = None;
+                // The fields are taken out of the app for this frame and put back at the end — otherwise
+                // egui writes empty strings into them every frame and the typing disappears.
+                let mut pending_host: Option<String> = None;
+                let mut pending_label: Option<String> = None;
+                let mut drop_host = false;
+                let mut drop_label = false;
+                let host_id = ui.id().with(SETTINGS_HOST_ID_SALT);
+                let label_id = ui.id().with(SETTINGS_LABEL_ID_SALT);
+                let mut take =
+                    |id: egui::Id| app.settings_target_ids.remove(&id).unwrap_or_default();
+                let host_key = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    let mut host = take(host_id);
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut host)
+                                .hint_text(lang.hint_settings_address())
+                                .desired_width(200.0),
+                        )
+                        .changed()
+                    {
+                        pending_host = Some(host.clone());
+                    }
+                    let mut label = take(label_id);
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut label)
+                                .hint_text(lang.hint_settings_label())
+                                .desired_width(160.0),
+                        )
+                        .changed()
+                    {
+                        pending_label = Some(label.clone());
+                    }
+                    // Enter in the address field is enough — the address is what one types first.
+                    if (ui.button(lang.add_btn()).clicked() || host_key) && !host.trim().is_empty()
+                    {
+                        add = Some((host.trim().to_string(), label.trim().to_string()));
+                        drop_host = true;
+                        drop_label = true;
+                    }
+                });
+                if let Some(host) = pending_host {
+                    app.settings_target_ids.insert(host_id, host);
+                }
+                if let Some(label) = pending_label {
+                    app.settings_target_ids.insert(label_id, label);
+                }
+                if drop_host {
+                    app.settings_target_ids.remove(&host_id);
+                }
+                if drop_label {
+                    app.settings_target_ids.remove(&label_id);
+                }
+                if let Some((host, label)) = add {
+                    // A new target is measured right away too — otherwise it just sits there as an empty
+                    // row and the first impression is a zero.
+                    app.add_suggested_target(&host, &label);
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(lang.suggestions()).weak().size(11.5));
+                    for (host, label) in [
+                        ("8.8.8.8", "Google DNS"),
+                        ("1.1.1.1", "Cloudflare"),
+                        ("9.9.9.9", "Quad9"),
+                        ("224.0.0.1", "Multicast"),
+                    ] {
+                        if ui
+                            .small_button(label)
+                            .on_hover_text(i18n::fill(
+                                lang.tip_add_suggestion_fmt(),
+                                &[("host", host.to_string())],
+                            ))
+                            .clicked()
+                        {
+                            app.add_suggested_target(host, label);
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                // The switch sits in the window itself rather than in a settings file: someone who has
+                // opened the program and cannot read it is exactly the person who cannot find an option
+                // named after a language they do not speak. Each name is written in its own language, so
+                // both stay recognisable whichever one is currently showing.
+                ui.label(RichText::new(lang.language()).strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    for l in Lang::ALL {
+                        if ui
+                            .selectable_label(app.options.language == l, l.native_name())
+                            .on_hover_text(i18n::fill(
+                                lang.tip_language_fmt(),
+                                &[("name", l.native_name().to_string())],
+                            ))
+                            .clicked()
+                        {
+                            app::set_language(app, l);
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                ui.label(RichText::new(lang.appearance_group()).strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(lang.theme_scheme_label());
+                    for (value, label) in [
+                        ("system", lang.system_theme()),
+                        ("light", lang.light()),
+                        ("dark", lang.dark()),
+                    ] {
+                        let on = app.options.theme == value;
+                        if ui.selectable_label(on, label).clicked() {
+                            app.options.theme = String::from(value);
+                            dirty = true;
+                        }
+                    }
+                });
+                ui.label(RichText::new(lang.tip_system_theme()).weak().size(11.5));
+            });
+
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                // There used to be a "Target" group here with "remove target" and "reset probe". Removal
+                // now happens at the target itself (the inline editor), and a button that hit whichever
+                // target was selected was far too easy to misunderstand.
+                ui.label(RichText::new(lang.data_group()).strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(lang.export_csv())
+                        .on_hover_text(lang.tip_export_default())
+                        .clicked()
+                    {
+                        let path = default_export_path();
+                        app.export_csv(path);
+                    }
+                    if ui
+                        .button(lang.save_as())
+                        .on_hover_text(lang.tip_save_as())
+                        .clicked()
+                    {
+                        app.open_export_dialog();
+                    }
+                    // A2: no "save" button — everything is written on every change anyway, so what such a
+                    // button promises would not be true. The status bar says when now.
+                    // This affects all targets — which is why the button says so as well. An open editor
+                    // is committed first, otherwise the values vanish under the open inputs.
+                    // Because the history cannot be undone, the button wants two clicks: the first only
+                    // arms it and asks, the second deletes. After a few seconds the asking lapses again,
+                    // otherwise a forgotten warning would delete something.
+                    let clear_label = if app.clear_armed {
+                        lang.clear_measurements_q()
+                    } else {
+                        lang.clear_measurements()
+                    };
+                    let clear_btn =
+                        ui.button(RichText::new(clear_label).color(if app.clear_armed {
+                            m.danger_text()
+                        } else {
+                            Color32::from_rgb(150, 150, 150)
+                        }));
+                    // `on_hover_text` consumes the response, so both arms of the choice have to be
+                    // written as one expression that hands the (unchanged) response back.
+                    let clear_btn = if app.clear_armed {
+                        clear_btn.on_hover_text(lang.tip_clear_again())
+                    } else {
+                        clear_btn.on_hover_text(lang.tip_clear_measurements())
+                    };
+                    if clear_btn.clicked() {
+                        if app.clear_armed {
+                            // Second click within the window: do it.
+                            app.clear_armed = false;
+                            app.clear_at = None;
+                            app.close_edit();
+                            app.reset_stats();
+                        } else {
+                            app.clear_armed = true;
+                            app.clear_at = Some(std::time::Instant::now());
+                        }
+                    }
+                    ui.label(RichText::new(lang.autosave_note()).weak().size(11.5));
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut app.options.protocol_log, lang.protocol_label())
+                        .on_hover_text(lang.tip_protocol_log())
+                        .changed()
+                    {
+                        let format =
+                            crate::exporter::ProtocolFormat::from_path(&app.options.protocol_path);
+                        app.set_protocol(app.options.protocol_log, format);
+                        dirty = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(app.options.protocol_log, |ui| {
+                        let mut path = app.options.protocol_path.clone();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut path)
+                                    .hint_text(lang.hint_protocol_path())
+                                    .desired_width(300.0),
+                            )
+                            .changed()
+                        {
+                            app.set_protocol(
+                                true,
+                                crate::exporter::ProtocolFormat::from_path(&path),
+                            );
+                            app.options.protocol_path = path;
+                            dirty = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            });
+
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                // B1/C5: shortcuts that cannot be read anywhere do not exist. What is written here is the
+                // same list that sits in the bar under the buttons.
+                ui.label(RichText::new(lang.keys_heading()).strong());
+                ui.add_space(4.0);
+                for (keys, what) in [
+                    ("1 – 4", lang.key_views()),
+                    (lang.key_space_label(), lang.key_space()),
+                    ("Esc", lang.key_esc()),
+                    ("← / →", lang.key_arrow()),
+                    (lang.key_wheel_label(), lang.key_wheel()),
+                    (lang.key_dblclick_chart_label(), lang.key_dblclick()),
+                    (lang.key_dblclick_list_label(), lang.key_list_dblclick()),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [180.0, 18.0],
+                            Label::new(RichText::new(keys).monospace().size(12.0))
+                                .selectable(false),
+                        );
+                        ui.label(RichText::new(what).size(12.0));
+                    });
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.group(|ui| {
+                ui.label(RichText::new(lang.info_group()).strong());
+                ui.label(
+                    RichText::new(format!(
+                        "{} {}\n{}",
+                        lang.app_title(),
+                        crate::app::APP_VERSION,
+                        lang.about_body()
+                    ))
+                    .weak()
+                    .size(11.5),
+                );
+            });
         });
-    });
 
     if dirty {
         app.sync_caps();
@@ -2389,14 +2577,14 @@ fn settings(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// Where „CSV exportieren“ writes without asking: the state folder, so the file lands next to the
+/// Where "CSV exportieren" writes without asking: the state folder, so the file lands next to the
 /// settings instead of wherever the shortcut happened to start the program from.
 pub fn default_export_path() -> PathBuf {
     store::state_dir().join(default_export_name())
 }
 
 /// The suggested file name — a timestamped name in the root of the target folder. Shared by the
-/// automatic export and the pre-filled name of „Speichern unter…“.
+/// automatic export and the pre-filled name of the "save as…" dialog.
 pub fn default_export_name() -> String {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     format!("system-ping-{stamp}.csv")

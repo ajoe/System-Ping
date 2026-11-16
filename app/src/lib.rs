@@ -6,6 +6,7 @@
 pub mod app;
 pub mod exporter;
 pub mod history;
+pub mod i18n;
 pub mod ping;
 pub mod runtime;
 pub mod screenshot;

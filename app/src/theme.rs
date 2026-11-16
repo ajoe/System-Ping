@@ -16,9 +16,11 @@ pub const ORANGE: Color32 = Color32::from_rgb(236, 130, 56);
 pub const BLACK_TEXT: Color32 = Color32::from_rgb(0, 0, 0);
 pub const WHITE_TEXT: Color32 = Color32::from_rgb(255, 255, 255);
 
-/// One entry of the automatic trace palette: a name to show in the picker and the two shades.
+/// One entry of the automatic trace palette: a name to show in the picker (in both languages) and
+/// the two shades.
 pub struct Swatch {
-    pub name: &'static str,
+    pub name_de: &'static str,
+    pub name_en: &'static str,
     light: [u8; 3],
     dark: [u8; 3],
 }
@@ -27,48 +29,56 @@ pub struct Swatch {
 /// stay distinguishable even though the chart paints every line at 1.5 px on the same grid.
 pub const PALETTE: &[Swatch] = &[
     Swatch {
-        name: "Blau",
+        name_de: "Blau",
+        name_en: "Blue",
         light: [30, 105, 190],
         dark: [86, 160, 235],
     },
     Swatch {
-        name: "Grün",
+        name_de: "Grün",
+        name_en: "Green",
         light: [24, 122, 76],
         dark: [70, 190, 110],
     },
     Swatch {
-        name: "Violett",
+        name_de: "Violett",
+        name_en: "Purple",
         light: [128, 74, 186],
         dark: [172, 132, 235],
     },
     Swatch {
-        name: "Türkis",
+        name_de: "Türkis",
+        name_en: "Teal",
         light: [18, 122, 132],
         dark: [70, 190, 200],
     },
     Swatch {
-        name: "Beere",
+        name_de: "Beere",
+        name_en: "Berry",
         light: [176, 54, 122],
         dark: [235, 118, 172],
     },
     Swatch {
-        name: "Sand",
+        name_de: "Sand",
+        name_en: "Sand",
         light: [140, 112, 24],
         dark: [214, 186, 96],
     },
     Swatch {
-        name: "Zinnober",
+        name_de: "Zinnober",
+        name_en: "Vermilion",
         light: [186, 62, 44],
         dark: [230, 104, 88],
     },
     Swatch {
-        name: "Schiefer",
+        name_de: "Schiefer",
+        name_en: "Slate",
         light: [74, 92, 116],
         dark: [144, 162, 188],
     },
 ];
 
-/// How many automatic colours there are. The picker uses it to decide when to offer „Auto“.
+/// How many automatic colours there are. The picker uses it to decide when to offer "auto".
 pub const PALETTE_LEN: usize = PALETTE.len();
 
 /// Size of a colour knob — the little square that says "this colour belongs to this line" in the
@@ -90,6 +100,14 @@ impl Swatch {
             Mode::Dark => self.dark,
         };
         Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    }
+
+    /// The name in one language.
+    pub fn name(&self, lang: crate::i18n::Lang) -> &'static str {
+        match lang {
+            crate::i18n::Lang::De => self.name_de,
+            crate::i18n::Lang::En => self.name_en,
+        }
     }
 }
 

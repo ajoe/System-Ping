@@ -26,7 +26,7 @@ fn viewport() -> Rect {
 /// in the tests below pins it to exactly one pass per call, which is what makes a press in one
 /// call and a release in the next behave like a real mouse click.
 fn pass(ctx: &Context, app: &mut App, t: f64, events: Vec<Event>) {
-    // Der Closure laeuft pro Durchlauf mehrmals, also wird hier reingebaut statt hineingezogen.
+    // The closure runs several times per pass, so it is built in place here rather than moved in.
     let mut raw = RawInput {
         events,
         time: Some(t),
@@ -66,12 +66,12 @@ fn row_rect(app: &App, row: usize) -> Rect {
     app.row_rects()
         .get(row)
         .copied()
-        .unwrap_or_else(|| panic!("Zeile {row} wurde nicht als Rect gemeldet"))
+        .unwrap_or_else(|| panic!("row {row} was never reported as a rect"))
 }
 
 /// A full click at `spot`: move the pointer there, press, release. The pointer rests inside the
 /// row the whole time, otherwise egui reports no click.
-fn klick_auf(ctx: &Context, app: &mut App, spot: Pos2, t0: f64) {
+fn click_at(ctx: &Context, app: &mut App, spot: Pos2, t0: f64) {
     pass(ctx, app, t0, vec![Event::PointerMoved(spot)]);
     pass(ctx, app, t0 + 0.02, vec![press(spot)]);
     pass(ctx, app, t0 + 0.04, vec![release(spot)]);
@@ -94,115 +94,111 @@ fn test_context() -> Context {
 }
 
 #[test]
-fn ein_klick_auf_eine_zeile_oeffnet_den_editor() {
-    let mut app = new_app("KlickOeffnet");
-    assert!(app.targets.len() >= 3, "der Test braucht drei Zeilen");
-    assert_eq!(app.edit_idx, None, "initial ist nichts in Bearbeitung");
+fn a_click_on_a_row_opens_its_editor() {
+    let mut app = new_app("ClickOpens");
+    assert!(app.targets.len() >= 3, "the test needs three rows");
+    assert_eq!(app.edit_idx, None, "nothing is being edited at the start");
 
     let ctx = test_context();
 
-    // Erster Pass baut das Layout auf, damit egui weiss, wo die Zeilen liegen.
+    // The first pass builds the layout so egui knows where the rows are.
     pass(&ctx, &mut app, 0.5, vec![]);
 
-    // Zeile 1 (DNS) anklicken.
+    // Click row 1 (DNS).
     let spot = row_rect(&app, 1).center();
-    klick_auf(&ctx, &mut app, spot, 1.0);
-    assert_eq!(
-        app.edit_idx,
-        Some(1),
-        "Klick auf Zeile 1 oeffnet deren Editor"
-    );
-    assert_eq!(app.selected, 1, "derselbe Klick markiert die Zeile");
+    click_at(&ctx, &mut app, spot, 1.0);
+    assert_eq!(app.edit_idx, Some(1), "a click on row 1 opens its editor");
+    assert_eq!(app.selected, 1, "the same click selects the row");
 
-    // Der Editor ist viel hoeher als die Zeile, die er ersetzt: alles unter ihm rueckt nach unten.
-    // Ein Klick muss den Editor umhaengen - und zwar dorthin, wo die Zeile JETZT liegt, nicht wohin
-    // sie vor dem Oeffnen zeigte. Der Ruhe-Pass laesst die Liste auf die neue Groesse kommen.
+    // The editor is much taller than the row it replaces: everything below it moves down. A click
+    // has to hang around the editor — and at the place where the row lies NOW, not where it pointed
+    // before opening. The idle pass lets the list settle at its new size.
     let label0 = app.targets[0].label.clone();
     pass(&ctx, &mut app, 1.5, vec![]);
     let spot2 = row_rect(&app, 2).center();
-    klick_auf(&ctx, &mut app, spot2, 2.0);
+    click_at(&ctx, &mut app, spot2, 2.0);
     assert_eq!(
         app.edit_idx,
         Some(2),
-        "Klick auf Zeile 2 wechselt den Editor"
+        "a click on row 2 switches the editor"
     );
     assert_eq!(
         app.targets[0].label, label0,
-        "nichts am ersten Ziel veraendert"
+        "nothing changed on the first target"
     );
 
-    // Und zurueck auf Zeile 0.
+    // And back to row 0.
     pass(&ctx, &mut app, 2.5, vec![]);
     let spot0 = row_rect(&app, 0).center();
-    klick_auf(&ctx, &mut app, spot0, 3.0);
-    assert_eq!(app.edit_idx, Some(0), "Klick auf Zeile 0 wechselt zurueck");
+    click_at(&ctx, &mut app, spot0, 3.0);
+    assert_eq!(app.edit_idx, Some(0), "a click on row 0 switches back");
 
-    // Der Editor zeigt das richtige Ziel.
+    // The editor shows the right target.
     assert_eq!(app.edit_label, "Gateway");
     assert_eq!(app.edit_host, "192.168.178.1");
 }
 
 #[test]
-fn ein_klick_auf_die_offene_zeile_laesst_den_editor_stehen() {
-    let mut app = new_app("KlickSteht");
+fn a_click_on_the_open_row_leaves_the_editor_alone() {
+    let mut app = new_app("ClickStands");
     let ctx = test_context();
     pass(&ctx, &mut app, 0.5, vec![]);
 
-    // Zeile 0 oeffnen und dort etwas tippen.
+    // Open row 0 and type something there.
     let spot = row_rect(&app, 0).center();
-    klick_auf(&ctx, &mut app, spot, 1.0);
+    click_at(&ctx, &mut app, spot, 1.0);
     assert_eq!(app.edit_idx, Some(0));
-    app.edit_label = "entwurf".to_string();
+    app.edit_label = "draft".to_string();
 
-    // Nochmal auf dieselbe Zeile klicken: der Editor bleibt samt Eingabe stehen. Ein Versehen kann
-    // so nichts schliessen - dafuer sind Abbrechen, Ubernehmen, Esc und der Klick auf eine andere
-    // Zeile da.
-    let offen = row_rect(&app, 0).center();
-    klick_auf(&ctx, &mut app, offen, 2.0);
+    // Clicking the same row again: the editor stays open together with what was typed. A slip of
+    // the mouse cannot close anything this way — cancel, save, Esc and clicking another row are
+    // there for that.
+    let open = row_rect(&app, 0).center();
+    click_at(&ctx, &mut app, open, 2.0);
     assert_eq!(
         app.edit_idx,
         Some(0),
-        "erneuter Klick auf die offene Zeile laesst sie offen"
+        "clicking the open row again leaves it open"
     );
-    assert_eq!(app.edit_label, "entwurf", "die Eingabe bleibt erhalten");
-    assert_eq!(app.targets[0].label, "Gateway", "nichts ist gespeichert");
+    assert_eq!(app.edit_label, "draft", "the input is kept");
+    assert_eq!(app.targets[0].label, "Gateway", "nothing is stored");
 
-    // Ein Klick ausserhalb der Liste tut dasselbe: nichts. Der Punkt liegt rechts neben der Liste
-    // und damit in jedem Fall ausserhalb aller Zeilen - frueher reichte dafuer ein fester Punkt unter
-    // den Zeilen, aber der Editor ist hoeher als eine normale Zeile und kann ihn inzwischen decken.
-    let unten_links = app
+    // A click outside the list does the same thing: nothing. The point sits to the right of the
+    // list and therefore outside every row in any case — a fixed point below the rows used to be
+    // enough for that, but the editor is taller than a normal row and can cover it by now.
+    let bottom = app
         .row_rects
         .iter()
         .map(|r| r.bottom())
         .fold(f32::NEG_INFINITY, f32::max);
-    let daneben = Pos2::new(
+    let beside = Pos2::new(
         app.row_rects
             .iter()
             .map(|r| r.right())
             .fold(0.0_f32, f32::max)
             + 40.0,
-        unten_links + 60.0,
+        bottom + 60.0,
     );
-    klick_auf(&ctx, &mut app, daneben, 3.0);
+    click_at(&ctx, &mut app, beside, 3.0);
     assert_eq!(
         app.edit_idx,
         Some(0),
-        "ein Klick ausserhalb der Liste laesst den Editor in Ruhe"
+        "a click outside the list leaves the editor alone"
     );
 }
 
 #[test]
 fn escape_closes_the_editor() {
-    let mut app = new_app("esc");
+    let mut app = new_app("EscCloses");
     let ctx = test_context();
 
     pass(&ctx, &mut app, 0.5, vec![]);
     let spot = row_rect(&app, 0).center();
-    klick_auf(&ctx, &mut app, spot, 1.0);
+    click_at(&ctx, &mut app, spot, 1.0);
     assert_eq!(app.edit_idx, Some(0));
 
     let label = app.targets[0].label.clone();
-    app.edit_label = "nicht speichern".to_string();
+    app.edit_label = "do not save".to_string();
 
     pass(
         &ctx,
@@ -216,6 +212,6 @@ fn escape_closes_the_editor() {
             physical_key: None,
         }],
     );
-    assert_eq!(app.edit_idx, None, "Esc schließt den Editor");
-    assert_eq!(app.targets[0].label, label, "und speichert nichts");
+    assert_eq!(app.edit_idx, None, "Esc closes the editor");
+    assert_eq!(app.targets[0].label, label, "and saves nothing");
 }

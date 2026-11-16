@@ -1,10 +1,16 @@
 # System-Ping Open Source
 
+[English version: README.en.md](README.en.md)
+
 Ein kleiner Netzwerk-Latenz-Monitor für Windows: mehrere Ziele im Intervall anpingen,
 Verlauf pro Ziel behalten, Live-Diagramm, Statistik, Statusliste, Alarme und CSV-Export.
 
 Gebaut als Clean-Room-Nachbau: die Oberfläche orientiert sich an Screenshots eines
 kommerziellen Werkzeugs, der Code ist vollständig eigenständig (Rust + [egui/eframe]).
+
+Die Oberfläche ist zweisprachig: **Deutsch und Englisch**, umschaltbar in den Einstellungen
+unter „Sprache“ (oder einmalig per `--lang en`). Alle Texte kommen aus einer einzigen Tabelle
+(`app/src/i18n.rs`), die Wahl wird mit den übrigen Optionen gespeichert.
 
 ## Bauen
 
@@ -16,7 +22,7 @@ dann unverändert.
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping.exe
-cargo test                   # 58 Tests (8 Unit- + 50 Integrationstests, ohne GUI)
+cargo test                   # 62 Tests (12 Unit- + 50 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -44,11 +50,37 @@ Ist `assets/icon.ico` neuer als die letzte Übersetzung, baut `build.rs` neu
 ```
 system-ping.exe                       Fenster öffnen
 system-ping.exe --help                Übersicht über alle Argumente (alias: -h)
+system-ping.exe --lang <de|en>        Sprache der Oberfläche für diesen Start, ohne sie zu speichern
 system-ping.exe --export-csv <datei>  gespeicherten Verlauf als CSV exportieren und beenden
 system-ping.exe --screenshot <datei.png> [ansicht]  ein Bild der Oberfläche rendern, wie es die Prüfung anfordert (alias: --shot)
 system-ping.exe --shot <png> [ansicht]   ein Bild der Oberfläche rendern (chart|stats|events|settings|edit)
 system-ping.exe --theme <hell|dunkel>  Aussehen für diese Sitzung überschreiben
 system-ping.exe --collect <sekunden>   Fenster kurz öffnen, messen, Zahlen ausgeben, beenden
+```
+
+`--help` antwortet in der Sprache des Starts: ohne `--lang` auf Deutsch, mit `--lang en` auf
+Englisch. Das ist die vollständige Ausgabe des Programms selbst, nicht eine Abschrift:
+
+```
+System-Ping Open Source — Latenz-Monitor
+
+Ohne Argumente öffnet sich das Fenster mit dem letzten Zustand (Ziele, Einstellungen,
+Fenstergröße). Messwerte werden alle 8 s automatisch in den Zustandsordner geschrieben.
+
+Argumente:
+  --help, -h              diese Übersicht zeigen und beenden
+  --lang <de|en>          Sprache der Oberfläche für diesen Start, ohne sie zu speichern
+  --theme <light|dark>    Aussehen für diesen Start erzwingen, ohne es zu speichern
+  --collect <sekunden>    im Fenster messen, berichten und beenden (Selbsttest)
+  --export-csv [datei]    gespeicherte Messwerte als CSV schreiben und beenden
+                          (ohne Dateiname: Standardordner, Zeitstempel im Namen)
+  --shot <datei.png> [ansicht]
+                          Bild der Oberfläche rechnen und beenden; Ansichten: chart,
+                          events, stats, settings, edit, dazu ein Zeitfenster wie 24h
+
+Umgebungsvariablen:
+  SYSTEM_PING_STATE_DIR   Zustandsordner (Dateien, Protokoll, Standard-Export) erzwingen
+  SYSTEM_PING_MAX_FRAMES  Bilderdurchlauf nach n Bildern abbrechen (nur für Testläufe)
 ```
 
 Das Bild kann auch ein anderes Zeitfenster zeigen, ohne die gespeicherten Einstellungen
@@ -74,14 +106,33 @@ die niemand misst, und die erste Frage ist, warum das Diagramm leer bleibt. Was 
 blieb (das Löschen des Verlaufs), heißt jetzt **„Messwerte löschen“** bei den Daten und betrifft
 ausdrücklich alle Ziele.
 
-Jedes Ziel bekommt automatisch eine eigene Linienfarbe aus einer Palette von acht Farben
-(Blaugrün, Blau, Violett, Orange, Grün, Zyan, Rot, Gelb); im Diagramm, in der Legende, in der
-Liste links und in den Sparklines ist es immer dieselbe. Der Farb-Knopf im Editor stellt sie um:
-eine Farbe wählen oder mit „Auto“ die automatische wieder übernehmen. Was man wählt, wird als
-Nummer der Palette gespeichert und überlebt einen Neustart; ein Ziel, das per Hand gewählt ist,
-gibt seine Farbe für die automatischen frei. Sind mehr Ziele als Farben da, werden die Farben
-wieder verwendet. Die kleine Scheibe vor dem Namen bleibt davon unberührt — sie zeigt weiter den
-Zustand (grün/gelb/orange/rot).
+Jedes Ziel bekommt automatisch eine eigene Linienfarbe aus einer Palette von acht Farben; im
+Diagramm, in der Legende, in der Liste links und in den Sparklines ist es immer dieselbe. Der
+Farb-Knopf im Editor stellt sie um: eine Farbe wählen oder mit „Auto“ die automatische wieder
+übernehmen. Was man wählt, wird als Nummer der Palette gespeichert und überlebt einen Neustart;
+ein Ziel, das per Hand gewählt ist, gibt seine Farbe für die automatischen frei. Sind mehr Ziele
+als Farben da, werden die Farben wieder verwendet. Die kleine Scheibe vor dem Namen bleibt davon
+unberührt — sie zeigt weiter den Zustand (grün/gelb/orange/rot).
+
+## Sprache: eine Tabelle, zwei Sprachen
+
+Alle Texte der Oberfläche hängen in `app/src/i18n.rs`: pro Text ein Eintrag für Deutsch und einer
+für Englisch, gruppiert nach dem Ort, an dem er erscheint. Aus dieser Tabelle erzeugt ein Makro
+pro Text eine Methode (`lang.chart()`, `lang.tip_sort_fmt()`), und jede Stelle im Programm holt
+sich ihren Text darüber — deshalb braucht ein Sprachwechsel keinen Neustart und keinen Aufbau: die
+nächste Runde fragt einfach erneut nach.
+
+Bewusst **nicht** übersetzt werden Dinge, die Daten sind statt Oberfläche: die Protokoll-Datei und
+die Ereigniszeilen, die sie schreibt, bleiben Deutsch (ein Export, der beim Umstellen seine eigene
+Vergangenheit umetikettiert, wäre schwer zu lesen), ebenso die CSV-Kopfzeile
+(`timestamp,target,latency_ms,status`) und die Platzhalter in den Adressfeldern. Die Kategorie- und
+Ansichts-Namen aus `TargetKind::label()` / `View::label()` sind ebenfalls Deutsch geblieben — sie
+dienen als beständige Kennung in Protokoll und Screenshot-Argumenten; was man sieht, kommt aus
+`Lang::kind()` bzw. `Lang::view()`.
+
+Neue Texte anlegen heißt: einen Arm in `texts!` schreiben (je einer für `de` und `en`) **und** den
+Namen in die Liste von `accessors!` eintragen. Fehlt der Name dort, fehlt die Methode; wird er
+doppelt eingetragen, scheitert der Build — beides also mit einer Fehlermeldung, nicht still.
 
 ## Schrift: immer dasselbe Schwarz bzw. Weiß
 
@@ -112,7 +163,7 @@ $ app\target\release\system-ping.exe --collect 10
 collect: Gateway        192.168.178.1        samples=5 antworten=5 letzte=1.0 ms
 collect: DNS (Google)   8.8.8.8              samples=5 antworten=5 letzte=13.0 ms
 collect: Internet       1.1.1.1              samples=5 antworten=5 letzte=10.0 ms
-collect: 15 Messwerte in dieser Zeit, davon 15 Antworten
+collect: 15 measurements in this time, 15 of them replies
 ```
 
 Der Lauf speichert sein Ergebnis, also zeigt `--export-csv` direkt danach dieselben Werte.
@@ -226,6 +277,8 @@ anderes als das Ordnerfenster zeigen.
   physikalischen Pixeln, Größe in logischen Punkten). Beim nächsten Start liegt das Fenster wieder
   da, wo es war; unplausible Werte (Null oder winzig) werden verworfen und es gibt die
   Standardgröße 1080×700. Ein `--shot` ändert die gespeicherte Lage nicht.
+* Dieselbe Datei merkt sich auch die **Sprache** (Feld `language`, `de` oder `en`). Ein `--lang`
+  auf der Befehlszeile gilt nur für diesen Start und schreibt nichts zurück.
 * CSV-Export: `timestamp,target,latency_ms,status` mit lokalen ISO-8601-Stempeln. „CSV exportieren“
   schreibt in den Zustandsordner, „Speichern unter…“ fragt vorher nach einem Ziel; beides läuft im
   Hintergrund, damit das Fenster beim Antworten nicht stehenbleibt. Die Statusleiste nennt die Datei,
@@ -238,10 +291,20 @@ Drei Felder sind in der Zustandsdatei gespeichert, aber bewusst ohne Knopf, weil
 steht: Ton bei Ausfall/Wiederherstellung, Symbol im Infobereich, minimiert starten. Die Werte bleiben
 erhalten, falls eine der Funktionen später kommt.
 
+## Bilder
+
+`app/shots/` hält je einen aktuellen Bildschirm pro Sprache (Deutsch dunkel, Englisch hell),
+erzeugt mit `--shot`:
+
+```sh
+system-ping.exe --shot app\shots\de-chart.png chart
+system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
+```
+
 ## Ordner
 
 * `app/` — Crate (Quellcode in `app/src`, GUI-freie Tests in `app/tests`, `build.rs` für die
-  Windows-Ressourcen)
+  Windows-Ressourcen, Screenshots in `app/shots`)
 * `assets/` — `icon.ico` (Dateisymbol) und `icon.png` (Fenstersymbol zur Laufzeit)
 * `reference/` — Screenshots des Vorbilds und eigene Vergleichsbilder
 * `capture/` — Hinweise zum Referenzmaterial

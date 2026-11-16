@@ -1,6 +1,6 @@
-// Klärt die Grundlage des Klick-Editors: meldet `Frame::show` einen Klick? Das ist nicht
-// selbstverständlich — der Rahmen registriert seine Fläche nur mit `Sense::hover()`. Der Test
-// klickt mit synthetischen egui-Events in eine Zeile wie sie `ui::left_body()` baut.
+// Settles the basis of the click editor: does `Frame::show` report a click? That is not a given —
+// the frame registers its area with `Sense::hover()` only. The test
+// clicks into a row built the way `ui::left_body()` builds one, using synthetic egui events.
 
 use egui::{Context, Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Response};
 
@@ -22,8 +22,8 @@ fn release(at: Pos2) -> Event {
     }
 }
 
-/// Ein egui-Durchlauf mit den gegebenen Ereignissen. `t` muss streng steigen — egui behauptet
-/// etwas über eine Uhr, die nicht rückwärts läuft.
+/// One egui pass with the given events. `t` has to increase strictly — egui insists on
+/// something about a clock that never runs backwards.
 fn pass(
     ctx: &Context,
     t: f64,
@@ -37,8 +37,9 @@ fn pass(
         ..Default::default()
     };
     raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(300.0, 400.0)));
-    // Der zurückgegebene `FullOutput` ist hier nicht interessant; was der Zeichen-Closure sah.
-    // Der Closure muss mehrmals laufen koennen, also darf `draw` nicht hineingezogen werden.
+    // The `FullOutput` that comes back is not interesting here; what matters is what the paint
+    // closure saw.
+    // The closure has to be able to run several times, so `draw` must not be moved into it.
     let _ = ctx.run(raw, |c| {
         egui::CentralPanel::default().show(c, |ui| draw(ui));
     });
@@ -87,6 +88,6 @@ fn what_does_a_frame_report_on_click() {
     pass(&ctx, 1.04, vec![release(at)], &mut observe);
 
     println!("at={at:?} hovered={hovered} clicked={clicked}");
-    assert!(hovered, "der Rahmen meldet zumindest Hover");
-    assert!(!clicked, "ein Rahmen allein meldet KEINEN Klick");
+    assert!(hovered, "the frame reports at least hover");
+    assert!(!clicked, "a frame alone reports NO click");
 }

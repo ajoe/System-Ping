@@ -1,12 +1,12 @@
-//! Prüft die Filter, die über Diagramm, Legende, Ereignisliste und Statistik entscheiden: die
-//! Kategorien als Schalter im Kopfbereich, einzelne Ziele, die per Klick auf ihren Namen in der
-//! Legende verschwinden, und das Textfeld. Alle drei laufen an einer Stelle zusammen
-//! (`App::shown_target_ids`), und genau das wird hier geprüft — nicht der Weg dorthin über Chips
-//! oder Legenden-Einträge, denn den nimmt die GUI dem Test ab.
+//! Checks the filters that decide what the chart, legend, event list and statistics show: the
+//! categories as switches in the header, single targets that disappear when their name in the
+//! legend is clicked, and the text field. All three meet at one place
+//! (`App::shown_target_ids`), and that is exactly what is checked here — not the way there through
+//! chips or legend entries, because the GUI takes care of that part.
 
 use system_ping::app::{App, AppOptions, TargetKind};
 
-/// Ein App-Exemplar mit bekannten Zielen, unabhängig davon, was das Netzwerk gerade hergibt.
+/// An app instance with known targets, independent of whatever the network happens to offer.
 fn app_with(targets: Vec<(&str, &str)>) -> App {
     let mut app = App::with_theme_override(AppOptions::default(), Vec::new(), None);
     app.targets.clear();
@@ -19,14 +19,14 @@ fn app_with(targets: Vec<(&str, &str)>) -> App {
     app
 }
 
-/// Die Standardziele, aber so gesetzt, dass jede Kategorie genau einmal vorkommt.
+/// The built-in targets, but set up so that every category appears exactly once.
 fn one_of_each() -> App {
     let mut app = app_with(vec![
         ("Gateway", "192.168.178.1"),
         ("NAS", "192.168.178.42"),
         ("DNS", "8.8.8.8"),
     ]);
-    // `add_target` rät die Kategorie aus der Adresse; hier soll sie ausdrücklich gesetzt sein.
+    // `add_target` guesses the category from the address; here it should be set explicitly.
     for (kind, host) in [
         (TargetKind::Gateway, "192.168.178.1"),
         (TargetKind::Lan, "192.168.178.42"),
@@ -36,54 +36,54 @@ fn one_of_each() -> App {
             .targets
             .iter_mut()
             .find(|t| t.host == host)
-            .expect("Ziel vorhanden");
+            .expect("target present");
         t.kind = kind;
     }
     app
 }
 
-/// Ob ein Ziel im Diagramm steht, in der Legende und in der Statistik — also alle Filter passiert.
+/// Whether a target is in the chart, the legend and the statistics — i.e. it passed every filter.
 fn shown(app: &App, host: &str) -> bool {
     let id = app
         .targets
         .iter()
         .find(|t| t.host == host)
-        .expect("Ziel vorhanden")
+        .expect("target present")
         .id;
     app.shown_target_ids().contains(&id)
 }
 
-/// Eine Kategorie ausblenden nimmt alle ihre Ziele aus Diagramm, Legende und Statistik.
-/// Umgeschaltet wird über `App::toggle_kind`; die Chips im Kopfbereich rufen genau das auf.
+/// Hiding a category takes all of its targets out of the chart, the legend and the statistics.
+/// Switching happens through `App::toggle_kind`; the chips in the header call exactly that.
 #[test]
 fn eine_kategorie_aus_versteckt_alle_ihre_ziele() {
     let mut app = one_of_each();
     assert_eq!(
         app.shown_target_ids().len(),
         3,
-        "zunächst ist alles sichtbar"
+        "at first everything is visible"
     );
 
     app.toggle_kind(TargetKind::Lan);
-    assert!(!shown(&app, "192.168.178.42"), "die NAS ist weg");
-    assert!(shown(&app, "192.168.178.1"), "der Gateway bleibt");
-    assert!(shown(&app, "8.8.8.8"), "der DNS bleibt");
+    assert!(!shown(&app, "192.168.178.42"), "the NAS is gone");
+    assert!(shown(&app, "192.168.178.1"), "the gateway stays");
+    assert!(shown(&app, "8.8.8.8"), "the DNS server stays");
 
-    // Der Schalter wirkt auch für Kategorien, die gar kein Ziel hat: nichts zu tun ist in Ordnung.
+    // The switch also works for a category no target belongs to: doing nothing is fine.
     app.toggle_kind(TargetKind::Custom);
     assert_eq!(app.shown_target_ids().len(), 2);
 
-    // „Alle“ schaltet alles wieder an.
+    // "All" switches everything back on.
     app.show_all_kinds();
     assert_eq!(
         app.shown_target_ids().len(),
         3,
-        "nach „alle“ ist wieder alles da"
+        "after the all switch everything is back"
     );
 }
 
-/// Ein Klick auf den Namen in der Legende blendet nur dieses eine Ziel aus — die Legende selbst
-/// zeigt es weiter an, sonst könnte man es nicht zurückholen.
+/// Clicking the name in the legend hides only this one target — the legend itself
+/// still lists it, otherwise there would be no way to bring it back.
 #[test]
 fn ein_ausgeblendetes_ziel_bleibt_in_der_legende() {
     let mut app = one_of_each();
@@ -94,40 +94,37 @@ fn ein_ausgeblendetes_ziel_bleibt_in_der_legende() {
         .unwrap()
         .id;
 
-    assert!(
-        app.toggle_hidden_by_id(nas),
-        "das Ziel ist jetzt ausgeblendet"
-    );
+    assert!(app.toggle_hidden_by_id(nas), "the target is hidden now");
     assert!(
         !shown(&app, "192.168.178.42"),
-        "es fehlt in Diagramm und Statistik"
+        "it is missing from chart and statistics"
     );
-    assert!(shown(&app, "192.168.178.1"), "die Nachbarn bleiben");
+    assert!(shown(&app, "192.168.178.1"), "the neighbours stay");
 
-    // Die Legende muss es weiterhin nennen, sonst gibt es kein Zurück.
+    // The legend has to keep naming it, otherwise there is no way back.
     let legend = app.visible_targets();
-    assert!(legend.contains(&nas), "die Legende zeigt es weiter an");
+    assert!(legend.contains(&nas), "the legend still shows it");
 
     assert!(
         !app.toggle_hidden_by_id(nas),
-        "ein zweiter Klick holt es zurück"
+        "a second click brings it back"
     );
     assert!(shown(&app, "192.168.178.42"));
 }
 
-/// Der Textfilter sucht auch in der Kategorie, sonst findet man „LAN-Gerät“ nicht, obwohl die
-/// Spalte genau das zeigt.
+/// The text filter also searches the category, otherwise "LAN device" would not be found although the
+/// column shows exactly that.
 #[test]
 fn der_textfilter_findet_auch_die_kategorie() {
     let mut app = one_of_each();
     app.filter = String::from("LAN");
-    assert!(shown(&app, "192.168.178.42"), "die Kategorie passt");
-    assert!(!shown(&app, "8.8.8.8"), "das Internet-Ziel nicht");
+    assert!(shown(&app, "192.168.178.42"), "the category matches");
+    assert!(!shown(&app, "8.8.8.8"), "the internet target does not");
 
     app.filter = String::from("dns");
     assert!(
         shown(&app, "8.8.8.8"),
-        "der Name passt, und zwar ohne auf die Großschrift zu achten"
+        "the name matches, without caring about upper or lower case"
     );
     assert!(!shown(&app, "192.168.178.42"));
 
@@ -135,18 +132,18 @@ fn der_textfilter_findet_auch_die_kategorie() {
     assert_eq!(
         app.shown_target_ids().len(),
         3,
-        "ein leerer Filter blendet nichts aus"
+        "an empty filter hides nothing"
     );
 }
 
-/// Die Filter zusammen: ein Ziel ist nur sichtbar, wenn alle durchgehen.
+/// The filters together: a target is only visible when it passes all of them.
 #[test]
 fn text_und_kategoriefilter_gelten_gleichzeitig() {
     let mut app = one_of_each();
     app.filter = String::from("LAN");
     assert_eq!(app.shown_target_ids().len(), 1);
 
-    // Jetzt die Kategorie, auf die der Filter zeigt, aus: gar nichts bleibt übrig.
+    // Now switch off the category the filter points at: nothing is left.
     app.toggle_kind(TargetKind::Lan);
     assert!(app.shown_target_ids().is_empty());
 

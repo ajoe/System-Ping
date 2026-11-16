@@ -1,15 +1,15 @@
-// Prüft das 24-h-Diagramm: Die Voreinstellungen reichen bis einen Tag, und die Zahl der
-// Messwerte, die ein Ziel behält, wächst automatisch mit dem Fenster. Ohne diesen zweiten
-// Teil wäre ein Tag nur ein leeres Diagramm — bei einer festen Grenze von 2048 Wären bei
-// einer Sekunde Abstand nach einer halben Stunde alle älteren Werte weg.
+// Checks the 24 h chart: the presets reach a full day, and the number of measurements a target
+// keeps grows with the window automatically. Without that second part a day would just be an
+// empty chart — with a fixed cap of 2048 and one-second spacing, everything older than half an
+// hour would be gone.
 
 use system_ping::app::{
     effective_max_samples, samples_for_horizon, App, AppOptions, HorizonChoice, HORIZON_CHOICES,
     MIN_SAMPLES,
 };
 
-/// Das längste Fenster ist ein Tag, das kürzeste 15 s, und dazwischen liegen die Stufen,
-/// die man erwartet. Auf einen Tag zu kommen ist der eigentliche Wunsch dahinter.
+/// The longest window is a day, the shortest 15 s, and in between are the steps one expects.
+/// Reaching a full day is the actual wish behind this.
 #[test]
 fn the_presets_reach_a_day() {
     let secs: Vec<f32> = HORIZON_CHOICES.iter().map(|c| c.secs).collect();
@@ -17,59 +17,59 @@ fn the_presets_reach_a_day() {
     assert_eq!(
         secs.last().copied(),
         Some(86_400.0),
-        "längstes Fenster ist 24 h"
+        "longest window is 24 h"
     );
     assert!(
         secs.windows(2).all(|w| w[0] < w[1]),
-        "sortiert und ohne Wiederholung: {secs:?}"
+        "sorted and without repetition: {secs:?}"
     );
     for want in [60.0, 3_600.0, 86_400.0] {
-        assert!(secs.contains(&want), "{want} s fehlt");
+        assert!(secs.contains(&want), "{want} s is missing");
     }
 
-    // Ein Tag muss auch einen deutschen Namen haben, sonst zeigt das Auswahlfeld eine Zahl.
+    // A day also needs a label of its own, otherwise the dropdown would show a bare number.
     let day: &HorizonChoice = HORIZON_CHOICES.last().unwrap();
     assert_eq!(day.label, "24 h");
 }
 
-/// Die automatische Grenze richtet sich nach Fenster und Abstand: ein Tag bei einer Sekunde
-/// sind 86 400 Prüfungen, und weil Rückblättern drei Fenster braucht, kommt Luft dazu.
+/// The automatic cap follows window and interval: a day at one second is 86,400 probes, and since
+/// paging back needs three windows, there is some headroom on top.
 #[test]
 fn the_sample_budget_follows_the_window() {
-    // Der Standard: kurzes Fenster, also die Mindestgrenze.
+    // The default: a short window, so the minimum cap.
     assert_eq!(samples_for_horizon(60.0, 1.0), MIN_SAMPLES);
 
     let day = samples_for_horizon(86_400.0, 1.0);
     assert!(
         day >= 86_400,
-        "ein Tag bei 1 s braucht mindestens 86 400 Werte, geplant sind {day}"
+        "a day at 1 s needs at least 86,400 values, planned are {day}"
     );
 
-    // Größerer Abstand spart Speicher: alle zwei Sekunden etwa die Hälfte.
+    // A larger interval saves memory: every two seconds is roughly half.
     let half = samples_for_horizon(86_400.0, 2.0);
     assert!(
         (half as f64 - day as f64 / 2.0).abs() < 1_000.0,
-        "bei 2 s Abstand die Hälfte: {day} -> {half}"
+        "half the values at a 2 s interval: {day} -> {half}"
     );
 
-    // Eine Obergrenze muss bleiben — sonst schreibt ein Tipp in den Einstellungen das Konto voll.
+    // There has to be an upper bound — otherwise a typo in the settings would fill up memory.
     assert_eq!(samples_for_horizon(86_400.0, 0.25), 1_000_000);
 }
 
-/// `max_samples == 0` ist der neue Standard und heißt „automatisch“. Wer eine Zahl einträgt,
-/// bekommt sie; zu kleine Zahlen werden auf die Mindestgrenze gehoben, damit das Fenster nicht
-/// hinter seinem eigenen Speicher zurückbleibt.
+/// `max_samples == 0` is the default and means "automatic". Anyone who enters a number gets it;
+/// numbers that are too small are raised to the minimum cap so the window never falls behind its
+/// own memory.
 #[test]
 fn zero_means_auto_and_a_number_wins() {
     let mut o = AppOptions::default();
-    assert_eq!(o.max_samples, 0, "Standard ist automatisch");
+    assert_eq!(o.max_samples, 0, "the default is automatic");
     assert_eq!(effective_max_samples(&o), samples_for_horizon(60.0, 1.0));
 
-    // Tag und ein Sekundentakt: dieselbe Zahl, die das Diagramm braucht.
+    // A day and one-second spacing: the very number the chart needs.
     o.horizon_secs = 86_400.0;
     let auto = effective_max_samples(&o);
     assert_eq!(auto, samples_for_horizon(86_400.0, 1.0));
-    assert!(auto > 2_048, "ein Tag passt nicht mehr in die alte Grenze");
+    assert!(auto > 2_048, "a day no longer fits the old cap");
 
     o.max_samples = 5_000;
     assert_eq!(effective_max_samples(&o), 5_000);
@@ -77,12 +77,12 @@ fn zero_means_auto_and_a_number_wins() {
     assert_eq!(
         effective_max_samples(&o),
         MIN_SAMPLES,
-        "zu klein wird angehoben"
+        "too small is raised"
     );
 }
 
-/// Der eigentliche End-zu-End-Beweis: Ein Ziel, das ein Tag lang bei schnellem Abstand
-/// gemessen hat, darf durch die automatische Grenze nichts verlieren.
+/// The actual end-to-end proof: a target measured for a day at a fast interval must not lose
+/// anything through the automatic cap.
 #[test]
 fn a_day_of_history_survives_the_auto_budget() {
     std::env::set_var(
@@ -100,9 +100,9 @@ fn a_day_of_history_survives_the_auto_budget() {
     app.new_label = "Test".to_string();
     app.add_target();
 
-    // Ein Tag voller Messwerte im Abstand von 10 s: 86 400 s sind genau ein Tag, deshalb eine
-    // Spanne knapp darunter. Die Serie ist ein Ringpuffer — zu kleine Speichergrenze würde die
-    // älteste Hälfte stillschweigend verschwinden lassen, und genau das war der alte Wert 2048.
+    // A day full of measurements at a 10 s spacing: 86,400 s is exactly one day, hence a span a
+    // little below it. The series is a ring buffer — a cap that is too small would silently drop
+    // the oldest half, and that was exactly what the old value of 2048 did.
     let n = 8_500usize;
     let t = &mut app.targets[0];
     for k in 0..n {
@@ -117,80 +117,75 @@ fn a_day_of_history_survives_the_auto_budget() {
     assert_eq!(
         t.series.len(),
         n,
-        "kein Wert verloren: Kapazität {} bei {n} Werten",
+        "no value lost: capacity {} for {n} values",
         t.series.cap()
     );
 
-    // Und das Diagramm zeigt sie alle: Die Spanne von 89 990 s passt in ein Tagesfenster, und
-    // der Puffer trägt mindestens das Doppelte — sonst reichte er nicht für die Rückblättertaste.
+    // And the chart shows all of them: the span of 89,990 s fits a day window, and the buffer
+    // holds at least twice as much — otherwise it would not be enough for the page-back button.
     let horizon = app.options.horizon_secs as f64;
     let span = t.series.last().unwrap().t_secs - t.series.samples()[0].t_secs;
     assert!(
         span <= horizon,
-        "ein Tag Diagramm mit {span:.0} s Verlauf gefüllt"
+        "a day of chart filled with {span:.0} s of history"
     );
     assert!(
         (t.series.cap() as f64) >= 2.0 * n as f64,
-        "der Puffer trägt auch das Doppelte für das Rückblättern: {} gegen {n}",
+        "the buffer also holds twice as much for paging back: {} against {n}",
         t.series.cap()
     );
 }
 
-/// Das Diagramm braucht zu einem Tag auch passende Achsen: Ein Schritt von 900 s würde
-/// sechzig Gitterlinien übereinander drucken, und „Minuten:Sekunden“ läuft über einhundert
-/// Minuten davon.
+/// A day also needs matching axes: a step of 900 s would print sixty gridlines on top of each
+/// other, and "minutes:seconds" runs past a hundred minutes of them.
 #[test]
 fn a_day_gets_a_sensible_grid() {
     use system_ping::ui::{fmt_axis, nice_step};
 
-    // Rasterweite: kurze Fenster bleiben im Sekunden-Takt, ein Tag geht in Stunden.
+    // Grid spacing: short windows stay on seconds, a day goes in hours.
     assert_eq!(nice_step(60.0), 5.0);
     assert_eq!(nice_step(3_600.0), 300.0);
-    assert_eq!(nice_step(86_400.0), 7_200.0, "zwölf Linien pro Tag");
-    // Nie mehr als zwölf Linien — sonst steht die Achse voll.
+    assert_eq!(nice_step(86_400.0), 7_200.0, "twelve lines per day");
+    // Never more than twelve lines — otherwise the axis is packed solid.
     for h in [15.0f64, 30.0, 900.0, 7_200.0, 43_200.0, 86_400.0] {
-        assert!(h / nice_step(h) <= 12.0, "{h} s: Schritt {}", nice_step(h));
+        assert!(h / nice_step(h) <= 12.0, "{h} s: step {}", nice_step(h));
     }
 
-    // Kurz: Minuten und Sekunden. Das war vorher und bleibt so.
+    // Short: minutes and seconds. That is how it was before and how it stays.
     assert_eq!(fmt_axis(0.0, 60.0, None), "00:00");
     assert_eq!(fmt_axis(95.0, 600.0, Some(0)), "01:35");
 
-    // Ab zwei Stunden kommt die Uhrzeit — ein Tag in Minuten gezählt wäre unlesbar.
-    // Der Stempel ist 1 h nach Mitternacht UTC; ob die Anzeige dazu lokal 01:00 oder eine
-    // andere Stunde sagt, steht hier nicht fest, aber sie muss HH:MM sein.
+    // Past two hours the clock time appears — a day counted in minutes would be unreadable.
+    // The stamp is 1 h after midnight UTC; whether the display says 01:00 locally or another
+    // hour is not fixed here, but it has to be HH:MM.
     let tag = 86_400.0;
-    let mitternacht_utc = 0i64;
-    let erste_stunde = fmt_axis(3_600.0, tag, Some(mitternacht_utc + 3_600_000));
-    assert_eq!(
-        erste_stunde.len(),
-        5,
-        "HH:MM erwartet, kam {erste_stunde:?}"
-    );
+    let midnight_utc = 0i64;
+    let first_hour = fmt_axis(3_600.0, tag, Some(midnight_utc + 3_600_000));
+    assert_eq!(first_hour.len(), 5, "HH:MM expected, got {first_hour:?}");
     assert!(
-        erste_stunde.chars().nth(2) == Some(':'),
-        "Uhrzeit-Format erwartet, kam {erste_stunde:?}"
+        first_hour.chars().nth(2) == Some(':'),
+        "clock format expected, got {first_hour:?}"
     );
 
-    // Ohne echten Stempel (eine Sitzung, die noch nichts gemessen hat): Stunden statt Minuten.
+    // Without a real stamp (a session that has not measured anything yet): hours, not minutes.
     assert_eq!(fmt_axis(5_400.0, tag, None), "01:30 h");
     assert_eq!(fmt_axis(86_400.0, tag, None), "24:00 h");
 }
 
-/// Die Zeitfenster-Voreinstellungen müssen zu den Achsen passen: Zu jedem Fenster gehört ein
-/// Raster, das man zählen kann, und jedes Fenster ab zwei Stunden wird nach der Uhr benannt.
+/// The time-window presets have to match the axes: every window needs a grid one can count, and
+/// every window from two hours up is named after the clock.
 #[test]
 fn every_preset_window_labels_its_axis() {
     use system_ping::ui::{fmt_axis, nice_step};
 
     for c in HORIZON_CHOICES {
         let h = f64::from(c.secs);
-        assert!(h / nice_step(h) <= 12.0, "{}: zu viele Linien", c.label);
-        let uhr = fmt_axis(h, h, Some(1_700_000_000_000));
+        assert!(h / nice_step(h) <= 12.0, "{}: too many lines", c.label);
+        let clock = fmt_axis(h, h, Some(1_700_000_000_000));
         if h >= 2.0 * 3_600.0 {
-            assert_eq!(uhr.len(), 5, "{}: keine Uhrzeit ({uhr:?})", c.label);
+            assert_eq!(clock.len(), 5, "{}: no clock time ({clock:?})", c.label);
         } else {
-            assert_eq!(uhr.len(), 5, "{}: kein MM:SS ({uhr:?})", c.label);
+            assert_eq!(clock.len(), 5, "{}: not MM:SS ({clock:?})", c.label);
         }
     }
 }

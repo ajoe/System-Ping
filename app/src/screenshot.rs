@@ -5,6 +5,7 @@
 //! lines and text galley pixels. No engine internals are touched.
 
 use crate::app::{App, LogKind, View};
+use crate::i18n;
 use crate::theme;
 use crate::ui;
 use eframe::CreationContext;
@@ -141,15 +142,29 @@ impl Screencap {
             t.last_rtt = last;
             t.last_probe_secs = base_t - step;
         }
-        self.app.log_info("Beispielverlauf geladen (Prüfbild)");
+        let lang = self.app.lang();
+        self.app.log_info(i18n::fill(
+            lang.log_seeded_fmt(),
+            &[("n", (n * self.app.targets.len()).to_string())],
+        ));
         self.app.alert_count += 1;
+        let label = self.app.targets[1].label.clone();
         self.app.log_event(
             LogKind::Outage,
-            format!("Ausfall: {}", self.app.targets[1].label),
+            i18n::fill(
+                lang.log_outage_fmt(),
+                &[
+                    ("label", label.clone()),
+                    ("why", lang.log_why_timeout().to_string()),
+                ],
+            ),
         );
         self.app.log_event(
             LogKind::Recovery,
-            format!("Wieder online: {}", self.app.targets[1].label),
+            i18n::fill(
+                lang.log_recovery_fmt(),
+                &[("label", label), ("ms", "3".into())],
+            ),
         );
         n * self.app.targets.len()
     }
@@ -296,7 +311,7 @@ impl eframe::App for Screencap {
 /// This exists so "does the GUI actually record anything?" can be answered from a script
 /// instead of by watching a screen: `--collect 12` prints one line per target and closes the
 /// window. It also starts the measurement, because the window itself waits for the user to
-/// press „Alle starten", and it saves on the way out so `--export-csv` can show the same run.
+/// press "start all", and it saves on the way out so `--export-csv` can show the same run.
 pub struct SelfTest {
     app: App,
     until_secs: f64,
@@ -357,10 +372,7 @@ impl eframe::App for SelfTest {
                 );
             }
             let total: usize = self.app.targets.iter().map(|t| t.series.len()).sum();
-            println!(
-                "collect: {} Messwerte in dieser Zeit, davon {} Antworten",
-                total, ok_samples
-            );
+            println!("collect: {total} measurements in this time, {ok_samples} of them replies");
             // Written down before the window goes away, so a follow-up `--export-csv` reads
             // exactly what this run measured.
             self.app.save_now();
@@ -524,7 +536,7 @@ pub fn wants_edit(name: &str) -> bool {
 /// command line usually is not.
 pub fn horizon_from_arg(name: &str) -> Option<f32> {
     let s = name.trim().to_ascii_lowercase();
-    // Longest unit first so „stunden“ is not read as a number with a stray suffix.
+    // Longest unit first so "stunden" is not read as a number with a stray suffix.
     for (unit, secs) in [
         ("sekunden", 1.0f32),
         ("stunden", 3_600.0),

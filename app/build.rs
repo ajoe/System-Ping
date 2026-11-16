@@ -1,17 +1,17 @@
-// Baut die Windows-Ressourcen der EXE: Datei-Symbol im Explorer, dazu Version und
-// Beschreibung in den Eigenschaften. `winresource` erzeugt daraus eine .res-Datei und
-// uebergibt sie dem Linker (rc.exe bzw. llvm-rc), deshalb ist das Ergebnis dasselbe, was
-// ein normales Windows-Programm bekommt — kein Nachbearbeiten der fertigen EXE noetig.
+// Builds the Windows resources of the EXE: a file icon in Explorer, plus version and description
+// in the file properties. `winresource` generates a .res file from this and hands it to the linker
+// (rc.exe or llvm-rc), so the result is exactly what a regular Windows program gets — no need to
+// post-process the finished EXE.
 
 fn main() {
     println!("cargo::rerun-if-changed=assets/icon.ico");
     println!("cargo::rerun-if-changed=Cargo.toml");
 
     let mut res = winresource::WindowsResource::new();
-    // Pfad ist relativ zum Manifest-Ordner (app/), also hier ohne "app/".
+    // The path is relative to the manifest folder (app/), so "app/" is left off here.
     res.set_icon("../assets/icon.ico");
-    res.set_language(0x0409); // Englisch (USA), damit die Ressource sicher gefunden wird
+    res.set_language(0x0409); // English (US), so the resource is found reliably
     if let Err(e) = res.compile() {
-        println!("cargo::warning=Symbol-Einbettung fehlgeschlagen: {e}");
+        println!("cargo::warning=embedding the icon failed: {e}");
     }
 }

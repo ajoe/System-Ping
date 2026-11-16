@@ -2,6 +2,7 @@
 
 use crate::exporter;
 use crate::history::{self, is_ok, Fail, Sample, Series, Stats};
+use crate::i18n::{self, Lang};
 use crate::ping::{ProbeJob, ProbeResult};
 use crate::store;
 use crate::theme;
@@ -58,6 +59,10 @@ pub fn kind_index(kind: TargetKind) -> usize {
 
 /// Marker for "this target's colour comes from the palette, picked by its position in the list".
 pub const AUTO_COLOR: usize = usize::MAX;
+
+/// The program's version, shown in the About group. It is the one from `Cargo.toml` so the two
+/// cannot drift apart.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One monitored address.
 pub struct Target {
@@ -138,6 +143,10 @@ pub struct AppOptions {
     /// Missing in old files -> every category is on. See [`AppOptions::kind_filter`].
     #[serde(default = "all_kinds_on")]
     pub kinds_off: Vec<usize>,
+    /// Interface language, "de" or "en"; see [`crate::i18n::Lang`]. Missing in old files -> German,
+    /// which is what every state file written before this option showed.
+    #[serde(default)]
+    pub language: Lang,
 }
 
 /// The default for [`AppOptions::kinds_off`]: nothing switched off, so a state file written before
@@ -230,14 +239,45 @@ pub const MIN_SAMPLES: usize = 1_024;
 /// the timeout of the previous one anyway.
 pub const INTERVAL_CHOICES: &[f32] = &[0.25, 0.5, 1.0, 2.0, 5.0, 10.0];
 
-/// The label for one rung of [`INTERVAL_CHOICES`]: a quarter second reads as „0,25 s“, whole
-/// seconds without decimals.
-pub fn interval_label(secs: f32) -> String {
+/// The label for one rung of [`INTERVAL_CHOICES`]: a quarter second reads as "0,25 s" in German and
+/// "0.25 s" in English; whole seconds are written without decimals in both.
+pub fn interval_label(lang: Lang, secs: f32) -> String {
     if (secs - secs.round()).abs() < f32::EPSILON {
-        format!("{} s", secs as i64)
-    } else {
+        format!("{} {}", secs as i64, lang.seconds_unit())
+    } else if lang == Lang::De {
         format!("{secs:.2} s").replace('.', ",")
+    } else {
+        format!("{secs:.2} s")
     }
+}
+
+/// Switch the interface language and say so in the log. The log line is written in the language
+/// that results, which is what a person who has just switched wants to read.
+pub fn set_language(app: &mut App, lang: Lang) {
+    apply_language(app, lang, true);
+}
+
+/// Same switch, without saving or logging — used once at start-up, where the language comes from the
+/// command line and must not be written back to the file, and where a log line about a language
+/// nobody switched to would only be noise.
+pub fn set_language_silently(app: &mut App, lang: Lang) {
+    apply_language(app, lang, false);
+}
+
+fn apply_language(app: &mut App, lang: Lang, announce: bool) {
+    if app.options.language == lang {
+        return;
+    }
+    app.options.language = lang;
+    if !announce {
+        return;
+    }
+    let text = crate::i18n::fill(
+        lang.log_language_fmt(),
+        &[("lang", lang.native_name().to_string())],
+    );
+    app.log_info(text);
+    app.save_now();
 }
 
 /// The interval closest to an arbitrary number, i.e. the rung of [`INTERVAL_CHOICES`] a saved or
@@ -255,25 +295,23 @@ pub fn nearest_interval(secs: f32) -> f32 {
         .unwrap_or(1.0)
 }
 
-/// Was eine Stufe für das Messen bedeutet, in einem Satz. Steht als Tooltip an jeder Stelle, die
-/// das Intervall setzt: die Zahl allein sagt nicht, dass 0,25 s vier Prüfungen pro Sekunde sind und
-/// damit auch viermal `ping.exe` startet.
-pub fn interval_hint(secs: f32) -> String {
+/// What one rung of the interval ladder means for measuring, in one sentence. It stands as a
+/// tooltip wherever the interval is set: the number alone does not say that 0.25 s is four probes a
+/// second and therefore four starts of `ping.exe`.
+pub fn interval_hint(lang: Lang, secs: f32) -> String {
     let per_min = 60.0 / secs.max(0.01);
     let probes = if secs < 1.0 {
-        format!(
-            "{} Prüfungen pro Sekunde",
-            (1.0 / secs).round().max(1.0) as i64
+        i18n::fill(
+            lang.tip_probes_per_sec_fmt(),
+            &[("n", ((1.0 / secs).round().max(1.0) as i64).to_string())],
         )
     } else {
-        format!(
-            "eine Prüfung alle {} s",
-            interval_label(secs).replace(" s", "")
-        )
+        let n = interval_label(lang, secs).replace(' ', "");
+        i18n::fill(lang.tip_one_probe_every_fmt(), &[("n", n)])
     };
-    format!(
-        "{probes} — das sind etwa {:.0} Prüfungen je Ziel und Minute.",
-        per_min
+    i18n::fill(
+        lang.tip_per_minute_fmt(),
+        &[("probes", probes), ("per_min", format!("{per_min:.0}"))],
     )
 }
 
@@ -304,8 +342,8 @@ impl Default for AppOptions {
             timeout_ms: 2000,
             concurrency: 4,
             horizon_secs: 60.0,
-            // 0 = "so viele, wie das Zeitfenster braucht" (siehe `effective_max_samples`). Ein
-            // fester Wert wäre bei 24 h ein Schnitt nach einer halben Stunde.
+            // 0 = "as many as the chart window needs" (see `effective_max_samples`). A fixed number
+            // would cut a 24 h window off after half an hour.
             max_samples: 0,
             sound_alerts: false,
             system_tray_icon: true,
@@ -315,12 +353,13 @@ impl Default for AppOptions {
             protocol_log: false,
             protocol_path: String::new(),
             kinds_off: Vec::new(),
+            language: Lang::default(),
         }
     }
 }
 
-/// Eine Spalte der Statistik-Tabelle, die als Sortiervorlage taugt. Benannt wie die Überschrift,
-/// damit UI und Logik dieselben Wörter benutzen.
+/// A column of the statistics table that can be sorted by. Named like its heading so the UI and the
+/// sorting logic use the same words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortColumn {
     Label,
@@ -334,16 +373,17 @@ pub enum SortColumn {
     Outliers,
 }
 
-/// Die zuletzt gewählte Sortierung der Statistik-Tabelle.
+/// The sorting the statistics table was last ordered by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SortState {
     pub column: SortColumn,
     pub descending: bool,
 }
 
-/// Der Zahlen- oder Textwert eines Ziels für eine Sortierspalte. Eine eigene Sorte statt eines
-/// `f64`-Vergleichs im UI: die Statistik muss für die Sortierung genau einmal berechnet werden,
-/// und Ziele ohne Messwerte sollen unten stehen statt irgendwo in der Mitte zu erscheinen.
+/// The number or text a target offers for one sort column. Its own type rather than an `f64`
+/// comparison inside the UI: the statistics then have to be computed exactly once for the whole
+/// sort, and a target without measurements can be pushed to the bottom instead of landing somewhere
+/// in the middle.
 #[derive(Clone, Debug)]
 struct SortKey {
     text: Option<String>,
@@ -356,8 +396,8 @@ impl SortKey {
             if v.is_finite() && st.replies > 0 {
                 f64::from(v)
             } else {
-                // Kein Messwert: immer größer als jeder echte Wert, also bei absteigender
-                // Sortierung unten.
+                // No measurement: always larger than any real value, so descending order puts it
+                // at the bottom.
                 f64::MAX
             }
         };
@@ -412,6 +452,8 @@ pub enum View {
 }
 
 impl View {
+    /// German name, used as a stable identifier by screenshot mode and the log. The window shows
+    /// [`crate::i18n::Lang::view`] instead so the label follows the chosen language.
     pub fn label(&self) -> &'static str {
         match self {
             View::Chart => "Diagramm",
@@ -421,17 +463,9 @@ impl View {
         }
     }
 
-    pub fn hint(&self) -> &'static str {
-        match self {
-            View::Chart => "Latenzverlauf als Kurve, mit Ausreißern markiert",
-            View::Events => "Statusliste und Ereignisprotokoll",
-            View::Stats => "Kennzahlen je Ziel",
-            View::Settings => "Intervall, Zeitfenster, Export",
-        }
-    }
-
-    /// Tastenkürzel für diese Ansicht. Steht auf dem Knopf, weil ein Kürzel, das niemand kennt,
-    /// keines ist — und weil die Ziffer auf dem Knopf sonst eine Zahl ohne Erklärung wäre.
+    /// The keyboard shortcut for this view. It is printed on the button because a shortcut nobody
+    /// knows is not one — and because the digit on the button would otherwise be an unexplained
+    /// number.
     pub fn shortcut(&self) -> &'static str {
         match self {
             View::Chart => "1",
@@ -441,7 +475,7 @@ impl View {
         }
     }
 
-    /// Die Ansicht zum Kürzel, oder `None` bei einer Ziffer ohne Bedeutung.
+    /// The view a shortcut key selects, or `None` for a digit that means nothing.
     pub fn from_shortcut(key: &str) -> Option<View> {
         match key {
             "1" => Some(View::Chart),
@@ -457,9 +491,9 @@ pub struct App {
     pub options: AppOptions,
     pub targets: Vec<Target>,
     pub selected: usize,
-    /// Wonach die Statistik-Tabelle zuletzt sortiert wurde, und in welche Richtung. `None` heißt:
-    /// so wie die Ziele hinzugekommen sind. Absichtlich nicht gespeichert — nach einem Neustart
-    /// steht die Liste wieder in der Reihenfolge, in der sie auch in der Datei steht.
+    /// What the statistics table was last sorted by, and in which direction. `None` means: the
+    /// order the targets were added in. Deliberately not persisted — after a restart the list is
+    /// back in the order it has in the file too.
     pub sort: Option<SortState>,
     pub view: View,
     pub running: bool,
@@ -488,7 +522,7 @@ pub struct App {
     /// state and clears it, because a colour is stored per target and not in `AppOptions`.
     pub color_dirty: bool,
 
-    /// The "Messwerte löschen" button asks for a second click instead of deleting on the first:
+    /// The the "clear measurements" button asks for a second click instead of deleting on the first:
     /// the first click only arms it and turns its label into a warning. See [`Self::clear_at`].
     pub clear_armed: bool,
     /// When [`Self::clear_armed`] was set. The arming lapses after a few seconds so an ignored
@@ -501,17 +535,17 @@ pub struct App {
     /// Ids of the two new-target fields, filled while the top bar is drawn. The Enter shortcut
     /// compares `Memory::focused` against them (see `ui::NEW_HOST_ID_SALT`).
     pub new_target_ids: [egui::Id; 2],
-    /// Dasselbe für die beiden Zielfelder der Einstellungen-Gruppe „Ziele“ — hier liegen die
-    /// Texte selbst, weil egui diese Gruppe jeden Frame neu aufbaut und ein lokaler String
-    /// beim nächsten Klick leer wäre.
+    /// The same for the two target fields of the settings "Targets" group — the texts live here
+    /// too, because egui rebuilds that group every frame and a local string would be empty on the
+    /// next click.
     pub settings_target_ids: HashMap<egui::Id, String>,
     pub pan_offset_secs: f64,
 
     // Log of notable events (outages, recoveries).
     pub log: Vec<LogEntry>,
     pub log_total: usize,
-    /// Blendet in den Protokollzeilen die Info-Meldungen aus, wenn an. Nur Ansicht — die Liste
-    /// selbst bleibt vollständig, sonst wäre „leeren“ die einzige Möglichkeit zum Eingrenzen.
+    /// When on, hides the informational lines from the log. View only — the list itself stays
+    /// complete, otherwise "clear" would be the only way to narrow it down.
     pub log_only_outages: bool,
 
     /// Optional protocol file: every measurement is appended as it arrives.
@@ -534,7 +568,7 @@ pub struct App {
     // Background work handoff
     pending_export: Arc<AtomicBool>,
     export_result: Arc<MutexSlot<String>>,
-    /// „Speichern unter…“ dialog: whether one is open, and its answer. A channel rather than a
+    /// The "save as…" dialog: whether one is open, and its answer. A channel rather than a
     /// slot because the dialog's result may legitimately be `None` (the user cancelled). Only the
     /// receiving end is kept; the sending half is handed to the dialog thread each time. It never
     /// leaves the UI thread — the dialog thread only ever holds its own sender — so an `Rc` is
@@ -542,12 +576,12 @@ pub struct App {
     pending_dialog: Arc<AtomicBool>,
     export_dialog: std::rc::Rc<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     /// Registry answer for the autostart entry, written by a background thread. Read through
-    /// `autostart_state()`, which turns „not yet looked up“ into `None`.
+    /// `autostart_state()`, which turns "not yet looked up" into `None`.
     autostart_state: Arc<AtomicUsize>,
 
     /// Session clock of the last write to the state file — the autosave in [`Self::tick`] as well
-    /// as every explicit save. Drives „gesichert vor N s“ in the status bar, which is what tells
-    /// the user a change is on disk; a plain „Speichern“ button next to it was never needed.
+    /// as every explicit save. Drives "saved N s ago" in the status bar, which is what tells the
+    /// user a change is on disk; a plain "save" button next to it was never needed.
     pub last_save_secs: f64,
 
     pub status_msg: String,
@@ -556,12 +590,12 @@ pub struct App {
     pub chart_p95: Vec<f32>,
     /// Scratch buffer for [`history::Series::stats_window`], reused every frame.
     pub stats_scratch: Vec<f32>,
-    /// Ein Millisekundenwert pro Ziel: die Grenze, ab der ein Messwert als Ausreißer gilt. Wird im
-    /// Diagramm einmal pro Frame gefüllt und von den Kurven wie der Hover-Anzeige gelesen, damit
-    /// dieselbe Rechnung nicht mehrfach pro Bild läuft.
+    /// One millisecond value per target: the threshold above which a measurement counts as an
+    /// outlier. Filled once per frame by the chart and read by both the curves and the hover read-
+    /// out, so the same computation does not run several times per picture.
     pub cut_scratch: Vec<f64>,
-    /// Alle Latenzen der gezeigten Ziele in einem Vektor, für Median und p95 der Gesamtzeile. Nur so
-    /// lang wie die Antworten zusammen — siehe [`App::stats_total`].
+    /// Every latency of the shown targets in one vector, for the median and p95 of the totals row.
+    /// Only as long as the number of replies together — see [`App::stats_total`].
     pub all_rtt_scratch: Vec<f32>,
     /// Last theme the widgets were drawn for, so a switch re-tints everything.
     pub theme_mode: crate::theme::Mode,
@@ -614,7 +648,7 @@ impl App {
         self.window_geom = window_geom(ctx);
         let now = self.engine.elapsed_secs();
         self.tick(now);
-        // The "Messwerte löschen" warning lapses on its own, also when the view is elsewhere or
+        // The "clear measurements" warning lapses on its own, also when the view is elsewhere or
         // nothing is clicked. Checked per frame so no repaint has to be forced for it.
         self.expire_clear_armed();
         crate::ui::draw(ctx, self);
@@ -772,9 +806,8 @@ pub fn export_history_to(
         rows = collect_export_rows(&app.targets);
     }
     if rows.is_empty() {
-        return Err(String::from(
-            "Es gibt noch keine Messwerte zum Exportieren.",
-        ));
+        // Goes to the terminal, not to the window: this path runs without one.
+        return Err(String::from("there are no measurements to export yet."));
     }
     exporter::write_csv(path, &rows)
 }
@@ -878,9 +911,7 @@ impl App {
             export_dialog: std::rc::Rc::new(std::sync::mpsc::channel().1),
             autostart_state: Arc::new(AtomicUsize::new(usize::MAX)),
             last_save_secs: 0.0,
-            status_msg: String::from(
-                "Bereit. Ziel hinzufügen und mit „Start“ die Messung beginnen.",
-            ),
+            status_msg: Lang::default().msg_ready().to_string(),
             chart_p95: Vec::new(),
             stats_scratch: Vec::new(),
             cut_scratch: Vec::new(),
@@ -942,7 +973,7 @@ impl App {
         }
         app.sync_caps();
         // Ask Windows once, in the background, whether a Run entry exists. Until it answers the
-        // button shows „aus“; afterwards `poll_autostart` keeps it honest.
+        // button shows "off"; afterwards `poll_autostart` keeps it honest.
         app.check_autostart_once();
         app
     }
@@ -955,7 +986,7 @@ impl App {
     }
 
     /// Hand settings the engine owns over to it. Called whenever the settings panel reports a
-    /// change, so „Gleichzeitige Prüfungen“ takes effect immediately instead of on the next
+    /// change, so the "concurrent probes" takes effect immediately instead of on the next
     /// launch. The engine clamps the number itself.
     pub fn sync_engine(&mut self) {
         self.engine.set_concurrency(self.options.concurrency);
@@ -978,9 +1009,9 @@ impl App {
         }
 
         // A finished CSV export reports itself here; nothing else picks the message up, and
-        // without this the status bar would read „Schreibe CSV-Datei …“ forever.
+        // without this the status bar would keep showing the "writing CSV" message forever.
         self.take_export_result();
-        // And the „Speichern unter…“ dialog once it comes back.
+        // And the the "save as…" dialog once it comes back.
         self.take_export_dialog();
         // Same for the autostart lookup that started at launch.
         self.poll_autostart();
@@ -1021,7 +1052,8 @@ impl App {
         // A protocol file that went bad says so once (the flag clears on a successful reopen).
         if let Some(p) = &self.protocol {
             if let Some(err) = p.failed.clone() {
-                self.status_msg = format!("Protokoll-Datei nicht schreibbar: {err}");
+                self.status_msg =
+                    i18n::fill(self.lang().msg_protocol_unwritable_fmt(), &[("err", err)]);
             }
         }
 
@@ -1066,6 +1098,8 @@ impl App {
             Outage(String),
         }
         let mut act = Act::None;
+        // Read the language out first: inside this block `self.targets` is borrowed mutably.
+        let lang = self.lang();
         {
             let t = &mut self.targets[idx];
             let fail = r.fail.map(Fail::from);
@@ -1078,15 +1112,13 @@ impl App {
             t.last_rtt = r.rtt_ms;
 
             if is_ok(r.rtt_ms) {
-                // Eine Wiederherstellung wird immer protokolliert. Sie hing früher an
-                // `options.sound_alerts`, obwohl die Option nichts anderes schaltet als einen
-                // Ton, den es nicht gibt — so fehlte die Zeile im Protokoll ohne ersichtlichen
-                // Grund.
+                // A recovery is always logged. It used to hang on `options.sound_alerts`, although
+                // that option switches nothing but a sound that does not exist — so the line was
+                // missing from the log without a visible reason.
                 if t.streak_bad > 0 {
-                    act = Act::Recovery(format!(
-                        "{} ist wieder erreichbar ({} ms).",
-                        t.label,
-                        fmt_ms(r.rtt_ms)
+                    act = Act::Recovery(i18n::fill(
+                        lang.log_recovery_fmt(),
+                        &[("label", t.label.clone()), ("ms", fmt_ms(r.rtt_ms))],
                     ));
                 }
                 t.streak_bad = 0;
@@ -1096,11 +1128,14 @@ impl App {
                 if t.streak_bad >= 2 && !t.alert_raised {
                     t.alert_raised = true;
                     let why = match fail {
-                        Some(Fail::Resolve) => "DNS schlägt fehl",
-                        Some(Fail::Error) => "Ping-Fehler",
-                        _ => "Timeout",
+                        Some(Fail::Resolve) => lang.log_why_resolve(),
+                        Some(Fail::Error) => lang.log_why_error(),
+                        _ => lang.log_why_timeout(),
                     };
-                    act = Act::Outage(format!("{} antwortet nicht ({}).", t.label, why));
+                    act = Act::Outage(i18n::fill(
+                        lang.log_outage_fmt(),
+                        &[("label", t.label.clone()), ("why", why.to_string())],
+                    ));
                 }
             }
         }
@@ -1201,14 +1236,26 @@ impl App {
         self.push_log(secs, text.into(), kind);
     }
 
+    /// The interface language in use. Every text the window shows is looked up here, so switching
+    /// needs no rebuild — the next frame simply asks again.
+    pub fn lang(&self) -> Lang {
+        self.options.language
+    }
+
+    /// The view's name in the current language. [`View::label`] stays German because screenshot mode
+    /// and the log use it as a stable identifier.
+    pub fn view_label(&self, v: View) -> &'static str {
+        self.lang().view(v)
+    }
+
     /// Seconds since the app started (the chart's x axis).
     pub fn now_secs(&self) -> f64 {
         self.engine.elapsed_secs()
     }
 
-    /// Die Uhrzeit zu einem Zeitpunkt in Sekunden seit Programmstart — dieselbe Rechnung wie im
-    /// CSV-Export und im Protokoll, damit eine Protokollzeile, eine Ereigniszeile und die Datei über
-    /// denselben Moment reden. `HH:MM:SS`, weil ein Tag in der Liste sonst nicht ausginge.
+    /// The clock time for a moment given in seconds since start-up — the same computation as in the
+    /// CSV export and the protocol file, so a protocol line, an event line and the file all talk
+    /// about the same moment. `HH:MM:SS`, because a day would not fit in the list otherwise.
     pub fn wall_clock(&self, secs: f64) -> String {
         let at = self.started_wall + chrono::Duration::milliseconds((secs * 1000.0) as i64);
         at.format("%H:%M:%S").to_string()
@@ -1216,8 +1263,8 @@ impl App {
 
     /// Jumps the chart window onto the next sample above its target's outlier cut,
     /// starting after the visible window: where the next outlier occurred.
-    /// Verschiebt das Diagrammfenster auf einen Zeitpunkt, so dass er mittig steht. Genutzt vom
-    /// Doppelklick auf eine Störungszeile: die Meldung und der zugehörige Verlauf an einem Ort.
+    /// Moves the chart window onto a moment so that it sits in the middle. Used by double-clicking
+    /// an outage line: the message and the history it belongs to, in one place.
     pub fn jump_to_secs(&mut self, secs: f64) {
         let horizon = self.options.horizon_secs as f64;
         let now = self.engine.elapsed_secs();
@@ -1282,7 +1329,7 @@ impl App {
                 self.pan_offset_secs = (now - t - horizon * 0.5).clamp(0.0, now.max(0.0));
                 self.follow_live = self.pan_offset_secs < 0.5;
             }
-            None => self.log_info("keine Auffälligkeiten in den gespeicherten Daten"),
+            None => self.log_info(self.lang().msg_no_outliers()),
         }
     }
 
@@ -1296,25 +1343,24 @@ impl App {
                     .insert(t.id, now + (i as f64 * 0.12).min(1.5));
             }
         }
-        self.status_msg = String::from("Messung läuft.");
+        self.status_msg = self.lang().msg_measuring().to_string();
     }
 
     pub fn stop(&mut self) {
         self.running = false;
         self.engine.stop_all();
-        self.status_msg = String::from("Messung angehalten.");
+        self.status_msg = self.lang().msg_stopped_edit().to_string();
     }
 
     pub fn add_target(&mut self) {
         // The editor keeps its target by index, so the list must not grow underneath it.
         if self.edit_idx.is_some() {
-            self.status_msg =
-                String::from("Zuerst die laufende Bearbeitung abschließen oder abbrechen.");
+            self.status_msg = self.lang().msg_finish_edit_first().to_string();
             return;
         }
         let host = self.new_host.trim().to_string();
         if host.is_empty() {
-            self.status_msg = String::from("Bitte eine Adresse eingeben (z. B. 192.168.1.1).");
+            self.status_msg = self.lang().msg_need_address().to_string();
             return;
         }
         let label = if self.new_label.trim().is_empty() {
@@ -1336,7 +1382,7 @@ impl App {
         self.new_host.clear();
         self.new_label.clear();
         self.selected = self.targets.len() - 1;
-        self.status_msg = format!("{host} wurde hinzugefügt.");
+        self.status_msg = i18n::fill(self.lang().msg_added_full_fmt(), &[("host", host)]);
     }
 
     /// Add a target with an explicit label (used by the quick-pick buttons).
@@ -1346,9 +1392,9 @@ impl App {
         self.add_target();
     }
 
-    /// Ein Ziel zu den Vorschlägen hinzufügen und sofort mit dem Messen anfangen. Der Knopf in den
-    /// Einstellungen tut das in einem Schritt: sonst steht die Zeile da, wird aber nicht gemessen,
-    /// und die erste Frage ist, warum das Diagramm leer bleibt.
+    /// Add a target from the suggestions and start measuring right away. The button in the settings
+    /// does both in one step: otherwise the row just sits there without being measured, and the
+    /// first question is why the chart stays empty.
     pub fn add_suggested_target(&mut self, host: &str, label: &str) {
         self.add_named_target(host, label);
         if !self.running {
@@ -1393,6 +1439,8 @@ impl App {
     /// Save the edits made in the inline editor. A changed host restarts that target's probes;
     /// a changed label only renames it. An empty host reverts to the old one.
     pub fn commit_edit(&mut self) {
+        // Read before `self.targets` is borrowed mutably below.
+        let lang = self.lang();
         let Some(idx) = self.edit_idx else { return };
         let Some(t) = self.targets.get_mut(idx) else {
             self.edit_idx = None;
@@ -1401,7 +1449,7 @@ impl App {
 
         let new_host = self.edit_host.trim().to_string();
         if new_host.is_empty() {
-            self.status_msg = String::from("Host darf nicht leer sein — Änderung verworfen.");
+            self.status_msg = self.lang().msg_empty_host().to_string();
             self.edit_idx = None;
             return;
         }
@@ -1452,19 +1500,26 @@ impl App {
         }
 
         self.status_msg = if host_changed && label_changed {
-            format!("{old_host} → {new_host}, umbenannt.")
+            i18n::fill(
+                lang.msg_host_to_label_fmt(),
+                &[("old", old_host), ("new", new_host)],
+            )
         } else if host_changed {
-            format!("{old_host} → {new_host}.")
+            i18n::fill(
+                lang.msg_host_to_fmt(),
+                &[("old", old_host), ("new", new_host)],
+            )
         } else if label_changed {
-            format!("Umbenannt zu {}.", t.label)
+            i18n::fill(lang.msg_renamed_full_fmt(), &[("label", t.label.clone())])
         } else if t.enabled != was_enabled {
-            if t.enabled {
-                format!("{} wird wieder gemessen.", t.label)
+            let key = if t.enabled {
+                lang.msg_resumed_fmt()
             } else {
-                format!("{} pausiert.", t.label)
-            }
+                lang.msg_paused_fmt()
+            };
+            i18n::fill(key, &[("label", t.label.clone())])
         } else {
-            String::from("Keine Änderung.")
+            lang.msg_no_change().to_string()
         };
 
         self.edit_idx = None;
@@ -1482,8 +1537,7 @@ impl App {
         }
         // Removing a row would shift the index the editor points at.
         if self.edit_idx.is_some() {
-            self.status_msg =
-                String::from("Zuerst die laufende Bearbeitung abschließen oder abbrechen.");
+            self.status_msg = self.lang().msg_finish_edit_first().to_string();
             return;
         }
         let i = self.selected.min(self.targets.len() - 1);
@@ -1495,7 +1549,7 @@ impl App {
         if self.selected >= self.targets.len() {
             self.selected = self.targets.len().saturating_sub(1);
         }
-        self.status_msg = format!("{label} wurde entfernt.");
+        self.status_msg = i18n::fill(self.lang().msg_removed_full_fmt(), &[("label", label)]);
     }
 
     pub fn reset_stats(&mut self) {
@@ -1509,54 +1563,60 @@ impl App {
         self.log.clear();
         self.log_total = 0;
         self.alert_count = 0;
-        self.status_msg = String::from("Messwerte gelöscht.");
+        self.status_msg = self.lang().msg_measurements_cleared().to_string();
     }
 
-    pub fn export_csv(&mut self, path: PathBuf) {
+    /// Start an export to `path`. Returns whether a file was actually handed to the worker: with no
+    /// samples, or a second click while an export is running, the caller gets `false` and the reason
+    /// goes into the status bar instead.
+    pub fn export_csv(&mut self, path: PathBuf) -> bool {
         if self.pending_export.load(Ordering::Acquire) {
-            self.status_msg = String::from("Export läuft bereits …");
-            return;
+            self.status_msg = self.lang().msg_export_running().to_string();
+            return false;
         }
         let rows = collect_export_rows(&self.targets);
         if rows.is_empty() {
-            self.status_msg = String::from("Es gibt noch keine Messwerte zum Exportieren.");
-            return;
+            self.status_msg = self.lang().msg_no_samples().to_string();
+            return false;
         }
-        // Der Name steht in der Statusleiste, und zwar so lange, bis die Meldung des Schreibthreads
-        // sie ablöst: `write_csv` nennt ihn ebenfalls, weil es auch von Pfaden aufgerufen wird, die
-        // keinen Namen zeigen sollen. Ein Export über ein langsames Netzlaufwerk ist nach einer
-        // Sekunde nicht mehr von einem hängenden Fenster zu unterscheiden, und „welche Datei?“ ist
-        // dann die erste Frage.
+        // The name belongs in the status bar, and stays there until the writer thread's message
+        // replaces it: `write_csv` mentions it too, because it is also called with paths that should
+        // not be shown. An export over a slow network drive is indistinguishable from a stuck window
+        // after a second, and "which file?" is the first question then.
         self.write_csv(path, rows);
+        true
     }
 
-    /// Schreibt eine CSV-Datei in den Zustandsordner und öffnet ihn im Explorer. Der Knopf dafür
-    /// sitzt in der Statusleiste: wer exportieren will, hat die Zahlen gerade vor sich und soll
-    /// nicht erst in den Einstellungen suchen müssen.
+    /// Writes a CSV file into the state folder and opens that folder in Explorer. The button for it
+    /// sits in the status bar: someone who wants to export has the numbers in front of them already
+    /// and should not have to look for it in the settings first.
     pub fn quick_export(&mut self) {
         let path = crate::ui::default_export_path();
-        self.export_csv(path.clone());
-        // Only report the folder when a file was actually handed to the worker — with no samples or
-        // a second click during a running export, `export_csv` says so itself and opening Explorer
-        // here would contradict that.
-        if self.status_msg.starts_with("Schreibe CSV-Datei") {
-            self.open_state_folder();
+        // Whether the worker was handed a file at all decides what follows, so `export_csv` reports
+        // that instead of having its status text read back — the wording changes with the language.
+        if !self.export_csv(path) {
+            return;
         }
+        self.open_state_folder();
     }
 
-    /// The actual write, shared by the automatic path and the „Speichern unter…“ dialog. It runs
+    /// The actual write, shared by the automatic path and the the "save as…" dialog. It runs
     /// on a worker thread so a slow disk or a network share never stops the window from drawing.
     fn write_csv(&mut self, path: PathBuf, rows: Vec<exporter::Row>) {
         self.pending_export.store(true, Ordering::Release);
         let flag = Arc::clone(&self.pending_export);
         let slot = Arc::clone(&self.export_result);
-        // Ohne den Zielpfad ist „Schreibe CSV-Datei …“ nach einer Sekunde nicht mehr von einem
-        // hängenden Fenster zu unterscheiden — und die Datei, auf die man wartet, wäre immer noch
-        // unbenannt. Der Schreibthread ersetzt die Zeile durch sein Ergebnis.
-        self.status_msg = format!("Schreibe CSV-Datei … {}", path.display());
+        // Without the target path, "Writing CSV file…" cannot be told apart from a stuck window
+        // after one second — and the file one is waiting for would still be an unnamed one. The
+        // writer thread replaces the line with its result.
+        let lang = self.lang();
+        self.status_msg = i18n::fill(
+            lang.msg_writing_csv_path_fmt(),
+            &[("path", path.display().to_string())],
+        );
         std::thread::spawn(move || {
             let msg = match exporter::write_csv(&path, &rows) {
-                Ok(n) => format!("CSV-Export geschrieben: {} Messwerte.", n),
+                Ok(n) => i18n::fill(lang.msg_csv_written_fmt(), &[("n", n.to_string())]),
                 Err(e) => e,
             };
             slot.put(msg);
@@ -1564,7 +1624,7 @@ impl App {
         });
     }
 
-    /// Open the system's „Speichern unter…“ dialog and export to whatever it returns.
+    /// Open the system's the "save as…" dialog and export to whatever it returns.
     ///
     /// The dialog runs on its own thread: on Windows it pumps messages of its own, which would
     /// fight egui's paint pass for the same raw window handle if this were called inline. So the
@@ -1576,21 +1636,24 @@ impl App {
         }
         let rows = collect_export_rows(&self.targets);
         if rows.is_empty() {
-            self.status_msg = String::from("Es gibt noch keine Messwerte zum Exportieren.");
+            self.status_msg = self.lang().msg_no_samples().to_string();
             return;
         }
         self.pending_dialog.store(true, Ordering::Release);
         let flag = Arc::clone(&self.pending_dialog);
         let (tx, rx) = std::sync::mpsc::channel();
         let start = crate::ui::default_export_name();
+        // Read out here: the thread that runs the dialog may not capture `self`.
+        let title = self.lang().msg_dialog_title().to_string();
+        let filter = self.lang().msg_csv_filter().to_string();
         std::thread::spawn(move || {
             // `rfd` needs a parent window on Windows to behave like a modal; without one the
             // dialog still works, it just is not tied to the app's z-order. Running it here, off
             // the paint pass, is what keeps its message pump from fighting egui for the window.
             let chosen = rfd::FileDialog::new()
-                .set_title("CSV exportieren")
+                .set_title(&title)
                 .set_file_name(&start)
-                .add_filter("CSV-Datei", &["csv"])
+                .add_filter(&filter, &["csv"])
                 .save_file();
             // The receiver may already be gone if the app closed while the dialog was open.
             let _ = tx.send(chosen);
@@ -1600,7 +1663,7 @@ impl App {
         // reads it on the next frame, and a channel that was never handed out simply stays empty.
         self.export_dialog = std::rc::Rc::new(rx);
         let _ = tx;
-        self.status_msg = String::from("Dialog zum Speichern geöffnet …");
+        self.status_msg = self.lang().msg_dialog_opened().to_string();
     }
 
     /// Take the dialog's answer, if there is one. A chosen path starts the export right away; a
@@ -1616,7 +1679,7 @@ impl App {
                     self.write_csv(path, rows);
                 }
             }
-            None => self.status_msg = String::from("Export abgebrochen."),
+            None => self.status_msg = self.lang().msg_export_cancelled().to_string(),
         }
     }
 
@@ -1641,9 +1704,9 @@ impl App {
         if wanted != found {
             self.options.autostart = found;
             self.status_msg = if found {
-                String::from("Autostart ist aktiv (Windows-Registry).")
+                self.lang().msg_autostart_on_registry().to_string()
             } else {
-                String::from("Autostart ist deaktiviert.")
+                self.lang().msg_autostart_off_registry().to_string()
             };
         }
     }
@@ -1704,8 +1767,8 @@ impl App {
         self.last_save_secs = self.engine.elapsed_secs();
     }
 
-    /// Wie lange die Zustandsdatei schon nicht mehr geschrieben wurde, in Sekunden. Negativ oder
-    /// sehr groß heißt: in diesem Durchlauf noch gar nicht gesichert (Autosave läuft alle 8 s).
+    /// How long ago the state file was last written, in seconds. Negative or very large means:
+    /// nothing has been saved during this run yet (the autosave runs every 8 s).
     pub fn save_age_secs(&self) -> f64 {
         if self.last_save_secs <= 0.0 {
             return -1.0;
@@ -1713,17 +1776,20 @@ impl App {
         (self.engine.elapsed_secs() - self.last_save_secs).max(0.0)
     }
 
-    /// Der Ordner, in dem Zustandsdatei, Protokoll und Standard-Export liegen.
+    /// The folder that holds the state file, the protocol file and the default export.
     pub fn state_folder(&self) -> PathBuf {
         store::state_dir()
     }
 
-    /// Den Zustandsordner im Windows-Explorer öffnen. Ein eigener Prozess, weil `explorer.exe`
-    /// sonst bis zum Schließen des Fensters blockieren würde; Fehler bleiben stumm, der Status
-    /// sagt nur, was versucht wurde.
+    /// Open the state folder in Windows Explorer. A separate process, because `explorer.exe`
+    /// would otherwise block until the window closes; failures stay silent and the status line
+    /// only says what was attempted.
     pub fn open_state_folder(&mut self) {
         let dir = store::state_dir();
-        self.status_msg = format!("Ordner geöffnet: {}", dir.display());
+        self.status_msg = i18n::fill(
+            self.lang().msg_folder_opened_fmt(),
+            &[("dir", dir.display().to_string())],
+        );
         std::thread::spawn(move || {
             let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
         });
@@ -1767,32 +1833,32 @@ impl App {
         Some(self.stats_for(t, &mut scratch))
     }
 
-    /// Die Kennzahlen eines Ziels über das aktuelle Zeitfenster — dieselbe Rechnung an allen Stellen:
-    /// Ziel-Liste, Statusliste, Statistik-Tabelle, Gesamtzeile und Sortierung. Vorher stand derselbe
-    /// Ausdruck fünfmal im UI, und jede Abschrift war eine Gelegenheit, woanders ein anderes Fenster
-    /// zu meinen (etwa das gespeicherte ganze statt des sichtbaren).
+    /// The numbers for one target over the current time window — one computation used everywhere:
+    /// target list, status list, statistics table, totals row and sorting. Before, the same
+    /// expression stood five times in the UI, and each copy was a chance to mean another window
+    /// somewhere (the whole stored history instead of the visible one, for instance).
     ///
-    /// Das Fenster ist das Ende der gespeicherten Messwerte minus `horizon_secs` bis ganz nach
-    /// hinten; ohne Messwerte zählt von Null an. `scratch` ist der Puffer, den `stats_window` für
-    /// die Perzentile braucht — pro Frame einmal vom `App` holen und am Ende zurücklegen.
+    /// The window runs from the newest stored measurement minus `horizon_secs` up to the end; with
+    /// no measurements it starts at zero. `scratch` is the buffer `stats_window` needs for the
+    /// percentiles — take it from the `App` once per frame and put it back when done.
     pub fn stats_for(&self, t: &Target, scratch: &mut Vec<f32>) -> Stats {
         let horizon = self.options.horizon_secs as f64;
         let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
         t.series.stats_window(from, f64::MAX, scratch)
     }
 
-    /// Die Kennzahlen aller gezeigten Ziele zusammen. Min, Max, Verlust und Ausr. sind über die
-    /// Einzelwerte der Ziele schon richtig, aber Median und p95 nicht: der Mittelwert der Mediane
-    /// zweier sehr verschiedener Ziele ist niemandes Median. Also werden hier alle Antworten in
-    /// einen Puffer gesammelt und die Perzentile daraus gezogen — dasselbe Verfahren wie pro Ziel,
-    /// nur über den ganzen Stapel hinweg.
+    /// The numbers of every shown target together. Min, max, loss and outliers are already right
+    /// when the per-target values are combined, but median and p95 are not: the average of the
+    /// medians of two very different targets is nobody's median. So all replies are collected into
+    /// one buffer here and the percentiles are drawn from it — same procedure as per target, just
+    /// over the whole pile.
     ///
-    /// Ein Ziel ohne Antwort trägt zu `min` nichts bei (sonst würde ein einzelner Ausfall das
-    /// Minimum aller Ziele auf 0 ziehen), und ohne jede Antwort ist `min` nicht 0, sondern
-    /// unendlich — die Oberfläche zeigt daraus „—“.
+    /// A target without a reply contributes nothing to `min` (otherwise a single outage would pull
+    /// the minimum of every target down to 0), and with no replies at all `min` is not 0 but
+    /// infinity — the interface turns that into "—".
     ///
-    /// `scratch` ist der Puffer der Einzelberechnungen, `all` der für die gesammelte Liste; beide
-    /// hängen am `App`, damit pro Frame nichts neues allokiert werden muss.
+    /// `scratch` is the buffer for the per-target computations, `all` the one for the collected
+    /// list; both live on the `App` so nothing new has to be allocated per frame.
     pub fn stats_total(&self, scratch: &mut Vec<f32>, all: &mut Vec<f32>) -> Stats {
         let horizon = self.options.horizon_secs as f64;
         all.clear();
@@ -1803,8 +1869,7 @@ impl App {
         let mut max = 0f32;
         let mut outliers = 0usize;
         for t in &self.targets {
-            // Dieselben Ziele wie die Tabelle darüber, damit „Gesamt“ genau die Zeilen zusammenzählt,
-            // die zu sehen sind.
+            // The same targets as the table above, so "Total" adds up exactly the rows one can see.
             if !self.shown(t) {
                 continue;
             }
@@ -1818,8 +1883,8 @@ impl App {
                 min = min.min(st.min);
                 max = max.max(st.max);
             }
-            // Nur die Antworten, keine Verlusste: Perzentile einer Latenz sind nur über Messwerte
-            // sinnvoll, und ein Verlust hat keine.
+            // Only the replies, no losses: percentiles of a latency only make sense over
+            // measurements, and a loss has none.
             all.extend(
                 t.series
                     .samples()
@@ -1828,7 +1893,7 @@ impl App {
                     .map(|s| s.rtt_ms),
             );
         }
-        // Perzentile aus der gesammelten Liste, wie `stats_window` sie auch pro Ziel bildet.
+        // Percentiles from the collected list, exactly as `stats_window` computes them per target.
         let (median, p95) = if all.is_empty() {
             (0.0, 0.0)
         } else {
@@ -1913,18 +1978,17 @@ impl App {
         }
     }
 
-    /// Sortiert die Ziele nach einer Spalte der Statistik-Tabelle. Der Name bleibt, wie er ist:
-    /// sortiert wird nur die Reihenfolge der Liste, und weil jedes Ziel seine Id und damit seine
-    /// manuell gewählte Farbe behält, wandert nichts zwischen Kurven umher. `descending` kehrt das
-    /// Ergebnis um — der erste Klick auf eine Spalte sortiert nach dem Wert absteigend („die
-    /// schlechtesten zuerst“), der zweite ascending.
+    /// Orders the targets by a column of the statistics table. Labels stay as they are: only the
+    /// order of the list changes, and because every target keeps its id and with it its manually
+    /// chosen colour, nothing wanders between curves. `descending` flips the result — the first
+    /// click on a column sorts by value descending ("the worst first"), the second ascending.
     pub fn sort_targets(&mut self, column: SortColumn, descending: bool) {
         let horizon = self.options.horizon_secs as f64;
         let mut scratch = std::mem::take(&mut self.stats_scratch);
-        // Vorher die Kennzahlen zu jeder Id, damit der Vergleich selbst nicht mehr rechnen muss.
-        // Der Vergleichswert wird sofort als fertiges Schlüsselpaar abgelegt — `sort_by` vergleicht
-        // jedes Ziel mehrfach, und ein Suchlauf über eine Liste von Schlüsseln wäre pro Vergleich
-        //(linear) durch die ganze Zielmenge.
+        // The statistics for every id up front, so the comparison itself never has to compute.
+        // The value is stored as a finished key pair right away — `sort_by` compares each target
+        // more than once, and scanning a list of keys per comparison would walk the whole set of
+        // targets (linearly) every time.
         let keys: BTreeMap<usize, (Option<String>, f64)> = self
             .targets
             .iter()
@@ -1953,24 +2017,24 @@ impl App {
                 _ => std::cmp::Ordering::Equal,
             }
         });
-        // Die Auswahl folgt dem Ziel, das sie war: sonst springt die Markierung beim Umsortieren
-        // auf einen Nachbarn, der mit dem Klick nichts zu tun hat.
+        // The selection follows the target it was: otherwise re-sorting would jump the marker to a
+        // neighbour that has nothing to do with the click.
         if let Some(pos) = self.targets.iter().position(|t| t.id == self.selected_id()) {
             self.selected = pos;
         }
     }
 
-    /// Id des gerade markierten Ziels (falls es noch existiert).
+    /// The id of the currently selected target (if it still exists).
     fn selected_id(&self) -> usize {
         self.targets.get(self.selected).map_or(usize::MAX, |t| t.id)
     }
 
-    /// How long a click on "Messwerte löschen" stays armed before the warning lapses. Long enough
+    /// How long a click on the "clear measurements" stays armed before the warning lapses. Long enough
     /// to read the changed label and click again, short enough that a forgotten warning never
     /// deletes anything.
     const CLEAR_ARM_SECS: u64 = 5;
 
-    /// Drops an expired arming of the "Messwerte löschen" button. Called wherever the button is
+    /// Drops an expired arming of the the "clear measurements" button. Called wherever the button is
     /// drawn, so leaving the view or waiting too long disarms it.
     pub fn expire_clear_armed(&mut self) {
         if !self.clear_armed {
@@ -2062,17 +2126,17 @@ impl App {
         }
     }
 
-    /// Der letzte Messwert eines Ziels als Text — pausiert, wartend, Millisekunden oder der Grund des
-    /// Fehlens. Dieselbe Kurzform an allen Stellen: Ziel-Liste links, Statusliste, Legende über dem
-    /// Diagramm und die Hover-Anzeige im Diagramm lesen alle hier, sonst steht irgendwann an einer
-    /// Stelle „timeout“ und an einer anderen „Timeout“.
+    /// The last measurement of a target as text — paused, waiting, milliseconds, or the reason it is
+    /// missing. The same short form everywhere: the target list on the left, the status list, the
+    /// legend above the chart and the hover read-out in the chart all read this one function.
     pub fn status_text(&self, t: &Target) -> String {
+        let lang = self.lang();
         if !t.enabled {
-            return "pausiert".into();
+            return lang.paused().into();
         }
         if t.last_rtt.is_nan() {
             return if self.running {
-                "wartet …".into()
+                lang.waiting().into()
             } else {
                 "—".into()
             };
@@ -2080,9 +2144,9 @@ impl App {
         if is_ok(t.last_rtt) {
             format!("{} ms", fmt_ms(t.last_rtt))
         } else {
-            // Der Grund statt nur „Timeout“: eine nicht auf lösbare Adresse und ein stummer Host
-            // sind zwei verschiedene Baustellen, und die Liste ist der Ort, an dem man sie zuerst
-            // liest. `Fail::short` ist dieselbe Kurzfassung, die auch im Protokoll steht.
+            // The reason rather than just "timeout": an unresolvable address and a silent host are
+            // two different problems, and this list is where one reads them first. `Fail::short` is
+            // the same short form that goes into the protocol file, so it stays German there.
             let why = self
                 .last_fail
                 .iter()
@@ -2213,7 +2277,7 @@ fn set_autostart(on: bool) -> bool {
 }
 
 /// Whether the HKCU Run entry that starts the app at logon exists. This is the read side of
-/// `set_autostart`; without it the button in the top bar can only ever say „aus“, because the
+/// `set_autostart`; without it the button in the top bar can only ever say "off", because the
 /// counter it reads is only ever written when the user presses it.
 fn autostart_exists() -> bool {
     #[cfg(windows)]

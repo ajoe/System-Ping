@@ -315,9 +315,12 @@ fn app_tick_collects_data_into_its_charts() {
     // local reply printed `Zeit<1ms`, the parser stopped at the `<` and called it a timeout, so
     // the charts filled up with failures and the log matched them.
     let texts: Vec<&str> = app.log.iter().map(|e| e.text.as_str()).collect();
+    // The log speaks the app's language (German by default), so ask for its own words.
+    let de = system_ping::i18n::Lang::De;
+    let dead_words = [de.log_why_timeout(), "erreichbar"];
     let failures: Vec<&&str> = texts
         .iter()
-        .filter(|t| t.contains("Timeout") || t.contains("nicht erreichbar"))
+        .filter(|t| dead_words.iter().any(|w| t.contains(w)))
         .collect();
     // Only a machine where the reference probe answers can prove the app agrees with it;
     // elsewhere ICMP itself is broken and there is nothing to compare against.

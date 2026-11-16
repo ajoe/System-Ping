@@ -37,7 +37,7 @@ fn alle_widget_zustande_nutzen_dieselbe_schriftfarbe() {
         let weak = v.weak_text_color();
         assert!(
             weak != want && weak != egui::Color32::TRANSPARENT,
-            "schwacher Text muss derselben Farbe gehören, nur leiser sein ({mode:?})"
+            "weak text has to belong to the same colour, only quieter ({mode:?})"
         );
     }
 }
@@ -57,7 +57,7 @@ fn gemalter_text_und_schwacher_text_passen_zusammen() {
             let (r, g, b, _) = c.to_tuple();
             assert!(
                 r == g && g == b,
-                "{mode:?}: schwacher Text darf nicht farbig sein ({c:?})"
+                "{mode:?}: weak text must not be coloured ({c:?})"
             );
             let faded = match mode {
                 Mode::Light => r < 255, // black, lightened towards the white panel
@@ -65,7 +65,7 @@ fn gemalter_text_und_schwacher_text_passen_zusammen() {
             };
             assert!(
                 faded,
-                "{mode:?}: schwacher Text muss leiser sein als {want:?}, nicht {c:?}"
+                "{mode:?}: weak text has to be quieter than {want:?}, not {c:?}"
             );
         }
         // `text_weak()` is the older name for the same thing — one function, not a second grey.
@@ -87,7 +87,7 @@ fn ausgewaehlter_text_ist_gegenueber_dem_hintergrund_leuchtend() {
             .max((i32::from(fg.b()) - i32::from(bg.b())).abs());
         assert!(
             dist > 120,
-            "{mode:?}: Auswahl wäre nicht lesbar ({fg:?} auf {bg:?})"
+            "{mode:?}: the selection would not be readable ({fg:?} on {bg:?})"
         );
     }
 }
