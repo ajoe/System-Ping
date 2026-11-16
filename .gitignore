@@ -19,7 +19,3 @@ v4.txt
 app/system-ping-state.json
 app/protocol.csv
 system-ping-*.csv
-
-# Überbleibsel des alten GNU/ld.lld-Link-Experiments (config.toml.bak beschreibt es)
-app/_alt_gnu_stubs/
-
