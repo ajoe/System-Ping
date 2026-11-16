@@ -1746,6 +1746,16 @@ impl App {
     }
 
     pub fn set_autostart(&mut self, on: bool) {
+        // The settings screen hides this switch where the OS has no mechanism we can write, but a
+        // stored file could still ask for it. Saying so in the log beats starting a thread that can
+        // only answer "no" — and keeps `options.autostart` from claiming something the system refused.
+        if !crate::platform::autostart::is_supported() {
+            if on {
+                self.log_info("Autostart wird auf diesem System nicht unterstützt.");
+            }
+            self.options.autostart = false;
+            return;
+        }
         self.options.autostart = on;
         let slot = Arc::clone(&self.autostart_state);
         std::thread::spawn(move || {
