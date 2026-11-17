@@ -12,24 +12,9 @@ pub fn write_csv(path: &std::path::Path, rows: &[Row]) -> Result<usize, String> 
     let mut buf = Vec::with_capacity(rows.len() * 48 + 64);
     buf.extend_from_slice(b"timestamp,target,latency_ms,status\n");
     for r in rows {
-        let field = |buf: &mut Vec<u8>, s: &str| {
-            buf.push(b'"');
-            for c in s.chars() {
-                match c {
-                    '"' => buf.extend_from_slice(b"\"\""),
-                    '\n' => buf.extend_from_slice(b"\\n"),
-                    '\r' => {}
-                    _ => {
-                        let mut tmp = [0u8; 4];
-                        buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
-                    }
-                }
-            }
-            buf.push(b'"');
-        };
-        field(&mut buf, &r.timestamp);
+        write_field(&mut buf, &r.timestamp);
         buf.push(b',');
-        field(&mut buf, &r.target);
+        write_field(&mut buf, &r.target);
         buf.push(b',');
         match r.latency_ms {
             Some(ms) => {
@@ -39,12 +24,47 @@ pub fn write_csv(path: &std::path::Path, rows: &[Row]) -> Result<usize, String> 
             None => buf.extend_from_slice(b"\"\""),
         }
         buf.push(b',');
-        field(&mut buf, &r.status);
+        write_field(&mut buf, &r.status);
         buf.push(b'\n');
     }
     std::fs::write(path, &buf).map_err(|e| format!("{}: {}", path.display(), e))?;
     // The caller reports how many rows landed on disk, not the byte count.
     Ok(rows.len())
+}
+
+/// Whether a spreadsheet would treat this field as something to *evaluate*.
+///
+/// The field that makes this necessary is the target's own name: a person (or a script that writes
+/// the state file) can call a target anything at all, and a name like `=HYPERLINK("http://…","ok")`
+/// reaches the export unchanged. Excel and LibreOffice both evaluate such a cell when the CSV is
+/// opened — quoting does not stop them, because the quotes only say where the field ends — so a name
+/// that begins with an operator character is written with a marker instead, and opens as text.
+/// Only the first character matters: a formula has to start there, and the writers keep leading
+/// whitespace inside the field.
+fn starts_a_formula(s: &str) -> bool {
+    matches!(s.chars().next(), Some('=' | '+' | '-' | '@' | '\t'))
+}
+
+/// One field, always quoted, with line breaks escaped and a formula marker defused (see
+/// [`starts_a_formula`]). The apostrophe that stops the formula stays visible in the cell: a name
+/// that reads slightly odd is a better outcome than a name that runs something.
+fn write_field(buf: &mut Vec<u8>, s: &str) {
+    buf.push(b'"');
+    if starts_a_formula(s) {
+        buf.push(b'\'');
+    }
+    for c in s.chars() {
+        match c {
+            '"' => buf.extend_from_slice(b"\"\""),
+            '\n' => buf.extend_from_slice(b"\\n"),
+            '\r' => {}
+            _ => {
+                let mut tmp = [0u8; 4];
+                buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+            }
+        }
+    }
+    buf.push(b'"');
 }
 
 /// How a protocol file is written.
@@ -149,12 +169,27 @@ impl Row {
     }
 }
 
-/// Quote a CSV field the way Excel expects.
+/// One field for a protocol line: quoted when it needs to be, and with a formula marker defused
+/// (see [`starts_a_formula`]). [`write_field`] is the same rule for the export, which quotes
+/// everything; this one quotes only what has to be quoted, because a protocol file is also meant to
+/// be read in a text editor — which is also why a line break inside a name is escaped instead of
+/// quoted: a record that runs over two lines cannot be read line by line any more.
 fn csv_field(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    if starts_a_formula(s) {
+        out.push('\'');
+    }
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            _ => out.push(c),
+        }
+    }
+    if out.contains(',') || out.contains('"') {
+        format!("\"{}\"", out.replace('"', "\"\""))
     } else {
-        s.to_string()
+        out
     }
 }
 
@@ -275,6 +310,61 @@ mod tests {
         assert_eq!(csv_field("google"), "google");
         assert_eq!(csv_field("a,b"), "\"a,b\"");
         assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        // A name with a line break in it has to stay one record.
+        assert_eq!(csv_field("two\nlines"), "two\\nlines");
+    }
+
+    /// A target's name is free text, and it ends up in the export and in the protocol file — both of
+    /// which people open in a spreadsheet. A name that starts like a formula is therefore written
+    /// with a marker, because quoting it does not stop Excel from evaluating it.
+    #[test]
+    fn a_name_that_starts_like_a_formula_is_written_as_text() {
+        for name in ["=1+1", "+4", "-4", "@mail", "\t=1+1"] {
+            assert!(
+                csv_field(name).starts_with('\''),
+                "{name:?} -> {:?}",
+                csv_field(name)
+            );
+        }
+        // Only the first character makes a formula, so an ordinary name keeps its spelling.
+        assert_eq!(csv_field("edge=0"), "edge=0");
+        assert_eq!(csv_field("gw-1"), "gw-1");
+
+        // The export quotes everything, so the marker goes inside the quotes.
+        let mut buf = Vec::new();
+        write_field(&mut buf, "=HYPERLINK(\"http://evil\",\"ok\")");
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\"'=HYPERLINK(\"\"http://evil\"\",\"\"ok\"\")\""
+        );
+    }
+
+    /// The same, seen in the file a person actually opens.
+    #[test]
+    fn the_export_masks_a_formula_named_target() {
+        let dir = std::env::temp_dir().join(format!("system-ping-mask-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("out.csv");
+        let row = |target: &str| Row {
+            timestamp: String::from("2025-01-01T12:00:00.000+01:00"),
+            target: target.to_string(),
+            latency_ms: Some(4.0),
+            status: String::from("ok"),
+        };
+
+        let n = write_csv(&path, &[row("=1+1"), row("loopback")]).unwrap();
+        assert_eq!(n, 2);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(
+            lines[1].starts_with("\"2025-01-01T12:00:00.000+01:00\",\"'=1+1\""),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].contains("\"loopback\""), "{}", lines[2]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

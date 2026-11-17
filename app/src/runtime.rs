@@ -1,7 +1,7 @@
 //! One shared monotone clock for the whole program.
 //!
 //! Every timestamp in a session comes from here: the probe engine stamps its results
-//! with [`elapsed_secs`], and the chart asks egui for the frame time, which eframe
+//! with [`secs_since_start`], and the chart asks egui for the frame time, which eframe
 //! fills from the same origin ([`secs_since_start`] at startup). Keeping both on one
 //! axis is what makes "now" in the view line up with "now" in the history - a second
 //! clock (a plain `Instant` inside the engine) would drift away from the frame time as

@@ -34,7 +34,7 @@ macOS only needs the command line tools (`xcode-select --install`). On Windows,
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 97 tests (33 unit + 64 integration, no GUI)
+cargo test                   # 104 tests (38 unit + 66 integration, no GUI)
 cargo clippy --all-targets   # clean
 ```
 
@@ -312,7 +312,8 @@ state folder and opens it; “⌂ Data” in the header does nothing else than s
 
 Two kinds of sentences share this one line: what a click reported (“3 → 1” after a move, “target
 saved”, which path an export is writing) and what announced itself (a measurement, a protocol file
-that can no longer be written, the autostart answer from the registry). Whatever the user did last
+that can no longer be written, a save that did not go through, the autostart answer from the
+registry). Whatever the user did last
 wins — and stays winning, not just for one frame. The automatic warning is not thrown away in the
 process: it comes back as soon as nothing newer is in the way, because it is still true; a protocol
 file that gets retried every 30 s must not be allowed to bury an action for half a minute. The
@@ -327,6 +328,16 @@ so a click with measuring stopped looked like no click at all. `app/tests/fixes.
 * `system-ping-state.json` — options plus history. Version 2 stores every measurement with an
   absolute Unix time in milliseconds; version 1 files (seconds since process start) are lifted onto
   a real time axis when loaded.
+* That file is **read part by part and written atomically**. A part that cannot be read — an
+  `options` block with a field this version does not know, a history entry that is not an entry —
+  costs only itself, and the rest of the file still counts. A file bigger than 32 MiB is not read at
+  all (that is a mistyped state folder rather than one's own settings), and a history entry that
+  nests deeper than the format ever writes is dropped on its own. Writes go through a sibling file
+  and a rename, so a crash or a power loss halfway through a save leaves the previous, complete file
+  where the next start looks for it. A save that fails for a different reason — the file held open by
+  another program, a state folder that is not there — says so in the status bar (“Could not save:
+  …”), and the “saved … s ago” clock stops advancing: it should only confirm a file that really
+  exists. `app/tests/save_status.rs` checks both cases.
 * The same file remembers the **window size and position** (field `window`, inner position in
   physical pixels, size in logical points). On the next start the window lies where it was;
   implausible values (zero or tiny) are discarded and the default size 1080×700 stands. A `--shot`
@@ -337,6 +348,9 @@ so a click with measuring stopped looked like no click at all. `app/tests/fixes.
   into the state folder, “Save as…” asks for a destination first; both run in the background so the
   window does not stall while answering. The status bar names the file one is waiting for, and
   later its result. An optional protocol file writes every measurement on continuously, right away.
+  A target name that starts with `=`, `+`, `-` or `@` is written with a leading `'` — otherwise a
+  spreadsheet turns that cell into a formula, and target names are free input. Quotes and line
+  breaks inside a name are escaped, so one measurement stays one line.
 
 ## What is still missing
 

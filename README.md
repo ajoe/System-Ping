@@ -34,7 +34,7 @@ macOS braucht nur die Command Line Tools (`xcode-select --install`). Unter Windo
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 97 Tests (33 Unit- + 64 Integrationstests, ohne GUI)
+cargo test                   # 104 Tests (38 Unit- + 66 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -325,7 +325,8 @@ anderes als das Ordnerfenster zeigen.
 
 In der Leiste teilen sich zwei Arten von Sätzen einen Platz: was ein Klick berichtet („3 → 1“
 nach dem Umziehen, „Ziel gespeichert“, welcher Pfad ein Export schreibt) und was von selbst
-meldet (eine Messung, ein Protokollfile, das nicht mehr schreibbar ist, die Autostart-Auskunft
+meldet (eine Messung, ein Protokollfile, das nicht mehr schreibbar ist, ein Speichern, das nicht
+durchging, die Autostart-Auskunft
 aus der Registry). Was der Nutzer zuletzt getan hat, gewinnt — und zwar dauerhaft, nicht nur für
 einen Frame. Die automatische Warnung wird dabei nicht weggeworfen: sie kommt wieder, sobald
 nichts Neueres da ist, denn sie ist ja noch wahr; ein Protokollfile, das alle 30 s neu
@@ -343,6 +344,17 @@ wird das in `app/tests/fixes.rs`.
 * `system-ping-state.json` — Optionen plus Verlauf. Version 2 speichert jeden Messwert mit
   absoluter Unix-Zeit in Millisekunden; Dateien von Version 1 (Sekunden seit Prozessstart)
   werden beim Laden auf eine echte Zeitachse gehoben.
+* Diese Datei wird **stückweise gelesen und atomar geschrieben**. Ein Teil, der sich nicht lesen lässt
+  — ein `options`-Block mit einem Feld, das diese Version nicht kennt, eine Zeile im Verlauf, die keine
+  Zeile ist — kostet nur diesen Teil, der Rest der Datei gilt weiter. Eine Datei, die größer als 32 MiB
+  ist, wird nicht gelesen (das ist eher ein vertipptes Zustandsverzeichnis als die eigenen Einstellungen),
+  und eine Verlaufszeile, die tiefer verschachtelt ist als das Format je schreibt, wird einzeln
+  verworfen. Geschrieben wird über eine Nebendatei mit anschließendem Umbenennen: Wer beim Speichern
+  abstürzt oder den Strom verliert, findet beim nächsten Start die bisher vollständige Datei — die
+  halbfertige war noch nicht am richtigen Namen. Geht ein Speichern dagegen schief, weil die Datei
+  von einem anderen Programm gehalten wird oder das Verzeichnis fehlt, sagt das die Statusleiste
+  („Speichern fehlgeschlagen: …“), und die „zuletzt gespeichert vor …“-Zeit bleibt stehen: Sie soll
+  nur eine Datei bestätigen, die wirklich da ist. `app/tests/save_status.rs` prüft beide Fälle.
 * Dieselbe Datei merkt sich die **Fenstergröße und -position** (Feld `window`, innere Position in
   physikalischen Pixeln, Größe in logischen Punkten). Beim nächsten Start liegt das Fenster wieder
   da, wo es war; unplausible Werte (Null oder winzig) werden verworfen und es gibt die
@@ -353,7 +365,10 @@ wird das in `app/tests/fixes.rs`.
   schreibt in den Zustandsordner, „Speichern unter…“ fragt vorher nach einem Ziel; beides läuft im
   Hintergrund, damit das Fenster beim Antworten nicht stehenbleibt. Die Statusleiste nennt die Datei,
   auf die man wartet, und später ihr Ergebnis. Eine optionale Protokoll-Datei
-  schreibt jeden Messwert sofort fortlaufend mit.
+  schreibt jeden Messwert sofort fortlaufend mit. Ein Zielname, der mit `=`, `+`, `-` oder `@` beginnt,
+  steht im Export mit vorangestelltem `'` — sonst macht Excel aus der Zelle eine Formel, und die
+  Zielnamen sind freie Eingabe. Anführungszeichen und Zeilenumbrüche in einem Namen werden escaped,
+  damit ein Messwert eine Zeile bleibt.
 
 ## Was noch fehlt
 

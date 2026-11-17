@@ -124,7 +124,7 @@ pub struct AppOptions {
     pub timeout_ms: u32,
     /// How many probes may run at the same time.
     pub concurrency: usize,
-    /// Chart window width in seconds. [`horizon_choices`] offers presets up to a day.
+    /// Chart window width in seconds. [`HORIZON_CHOICES`] offers presets up to a day.
     pub horizon_secs: f32,
     /// Max samples kept per target. `0` means "as many as the chart window needs" — see
     /// [`samples_for_horizon`]. That default is what makes a 24 h window possible at all: with
@@ -145,7 +145,7 @@ pub struct AppOptions {
     pub protocol_path: String,
     /// Categories the chart and the lists show, as numbers into [`TargetKind::all`] — a list of
     /// indices rather than a `HashSet` so it stays trivially serialisable and keeps its order.
-    /// Missing in old files -> every category is on. See [`AppOptions::kind_filter`].
+    /// Missing in old files -> every category is on. See [`App::all_kinds_on`].
     #[serde(default = "all_kinds_on")]
     pub kinds_off: Vec<usize>,
     /// Interface language, "de" or "en"; see [`crate::i18n::Lang`]. Missing in old files -> German,
@@ -592,7 +592,8 @@ pub struct App {
 
     pub status_msg: String,
     /// What the last action said, kept apart from what reported by itself. Two lines share one status bar, and they compete for
-    /// it every frame; this is what settles that. Automatic lines (a protocol file that went bad, a registry answer) write into
+    /// it every frame; this is what settles that. Automatic lines (a protocol file that went bad, a save that did not go
+    /// through, a registry answer) write into
     /// [`Self::status_auto`] and go away on their own — the protocol warning returns for its whole 30 s of retrying. Actions
     /// write here instead, through [`Self::say`], and stay until something newer replaces them. The bar shows this whenever it is
     /// not empty, which is why a click wins: see the end of [`Self::tick`].
@@ -600,7 +601,7 @@ pub struct App {
     /// What reported by itself most recently. Kept so one tick's warning cannot be handed to the bar as if it were the last word:
     /// only this line may come back on the next frame, never a sentence the user caused.
     status_auto: Option<String>,
-    /// Scratch buffer for the per-frame p95 scan in [`ui::chart`], so the chart doesn't
+    /// Scratch buffer for the per-frame p95 scan in `ui::chart`, so the chart doesn't
     /// allocate a fresh vector every frame.
     pub chart_p95: Vec<f32>,
     /// Scratch buffer for [`history::Series::stats_window`], reused every frame.
@@ -614,13 +615,13 @@ pub struct App {
     pub all_rtt_scratch: Vec<f32>,
     /// Last theme the widgets were drawn for, so a switch re-tints everything.
     pub theme_mode: crate::theme::Mode,
-    /// The click area of every row in the target list, as reported by [`ui::left_body`] during the last pass: one entry per row
+    /// The click area of every row in the target list, as reported by `ui::left_body` during the last pass: one entry per row
     /// *of [`App::targets`]*, counted after the live move of that pass. A row the panel did not draw — an open editor's form, or
     /// one below a scrollbar's edge — is `None` rather than left out, because every consumer counts rows by position here and a
     /// hole silently shifts all the places below it up by one.
     ///
     /// Counted in the list rather than in the order the rows were drawn: a pass publishes its layout only once its live move has
-    /// been applied (see `move_now` in [`ui::left_body`]), so from then on the two are the same order again and `row_rects[row]`
+    /// been applied (see `move_now` in `ui::left_body`), so from then on the two are the same order again and `row_rects[row]`
     /// means "the rect of `targets[row]`" — which is the only contract a pointer position can be read against without also naming
     /// the layout it was read in. See [`App::row_of`].
     pub row_rects: Vec<Option<egui::Rect>>,
@@ -638,7 +639,7 @@ pub struct App {
     /// A single layout is enough while a drag only has to follow the pointer, because the newest one is always what the hand can see. It stops
     /// being enough at the moment the press ends: that press began in an older layout, and if the list was redrawn in between — by a live move, or
     /// because an editor closed and pulled every row under it back up — the newest one no longer has a strip where the pointer came to rest. Keeping
-    /// the previous pass's as well is what lets [`ui::release_slot`] answer such a release for the layout the hand actually travelled over while
+    /// the previous pass's as well is what lets `ui::release_slot` answer such a release for the layout the hand actually travelled over while
     /// still counting the carried entry's own place in the current one. Two generations are all a gesture can reach: only one pass lies between
     /// reading a pointer and moving the list it aimed at.
     pub drag_layouts: Vec<crate::ui::RowLayout>,
@@ -1414,6 +1415,14 @@ impl App {
         self.status_note = Some(msg.into());
     }
 
+    /// The line that reported by itself most recently (see `status_auto`), without the user's
+    /// own sentence in front of it. Tests use this to ask whether a failure reached the bar at all:
+    /// [`Self::status_msg`] is only what the bar shows right now, and that also depends on whether
+    /// the user said something more recently.
+    pub fn status_auto_note(&self) -> Option<&str> {
+        self.status_auto.as_deref()
+    }
+
     /// The same rule for a sentence taken from the language table — the usual case for a message that
     /// comes from the UI text (`self.lang().msg_…()`).
     pub fn say_lang(&mut self, msg: &'static str) {
@@ -1491,7 +1500,7 @@ impl App {
     }
 
     /// Replace the whole list with a known set of named addresses. Tests and headless runs use this to be independent of what the
-    /// machine's network happens to offer: an app built from nothing starts with the built-in three (see [`default_targets`]), and
+    /// machine's network happens to offer: an app built from nothing starts with the built-in three (see `default_targets`), and
     /// a test that asks for A/B/C has to get exactly those three rows, not five. The selection starts at the top.
     ///
     /// The list is written directly rather than grown one `add_target` at a time: that path refuses to touch a list while an
@@ -1585,7 +1594,7 @@ impl App {
     }
 
     /// Puts a measurement into one target's history by id, as the real engine does through
-    /// [`App::apply_result`]. Tests use it to give a list something to draw: rows are laid out at the
+    /// `App::apply_result`. Tests use it to give a list something to draw: rows are laid out at the
     /// same height either way, but a row that has never answered shows "waiting" instead of a latency,
     /// and text that long can be what makes egui need a scrollbar.
     pub fn record_sample_for(&mut self, id: usize, rtt_ms: f32) {
@@ -2003,13 +2012,25 @@ impl App {
         let dir = store::state_dir();
         // `window_geom` is the last frame's answer; on the very first save of a run it is still
         // None, which simply leaves the file's window field empty.
-        let _ = store::save_window_to(
+        let saved = store::save_window_to(
             &dir,
             &self.options,
             &self.saved_targets(),
             self.window_geom.as_ref(),
         );
-        self.last_save_secs = self.engine.elapsed_secs();
+        // A save that did not go through says so, and does not count as a save: the bar's "saved
+        // 3 s ago" would otherwise promise a file that was never written. What is on disk is still
+        // the last complete one (see `write_atomically`), so this is a warning to act on rather
+        // than measurements already lost — which is why it says what the operating system said.
+        match saved {
+            Ok(()) => self.last_save_secs = self.engine.elapsed_secs(),
+            Err(e) => {
+                self.status_auto = Some(i18n::fill(
+                    self.lang().msg_save_failed_fmt(),
+                    &[("err", e.to_string())],
+                ))
+            }
+        }
     }
 
     /// How long ago the state file was last written, in seconds. Negative or very large means:
@@ -2284,7 +2305,7 @@ impl App {
     /// valid: an open editor can occupy a row, and while the list is being re-drawn after every move the old index
     /// already points somewhere else. An id always finds its target.
     ///
-    /// The selection follows the moved target (see [`App::selected_id`]).
+    /// The selection follows the moved target (see `App::selected_id`).
     ///
     /// Writing the file is deliberately *not* part of this: a drag that follows the pointer calls it on almost every
     /// pass, and one write per shuffle would be a disk access per frame. A finished gesture writes through

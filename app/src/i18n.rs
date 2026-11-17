@@ -454,6 +454,8 @@ macro_rules! texts {
     (en msg_empty_host) => { "The host must not be empty — change discarded." };
     (de msg_protocol_unwritable_fmt) => { "Protokoll-Datei nicht schreibbar: {err}" };
     (en msg_protocol_unwritable_fmt) => { "The protocol file cannot be written: {err}" };
+    (de msg_save_failed_fmt) => { "Speichern fehlgeschlagen: {err}" };
+    (en msg_save_failed_fmt) => { "Could not save: {err}" };
     (de msg_no_outliers) => { "keine Auffälligkeiten in den gespeicherten Daten" };
     (en msg_no_outliers) => { "no anomalies in the stored data" };
     (de msg_measuring) => { "Messung läuft." };
@@ -737,6 +739,7 @@ impl Lang {
         tip_per_minute_fmt,
         msg_empty_host,
         msg_protocol_unwritable_fmt,
+        msg_save_failed_fmt,
         msg_no_outliers,
         msg_measuring,
         msg_stopped_edit,

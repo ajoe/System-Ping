@@ -4,6 +4,10 @@
 //! `SYSTEM_PING_STATE_DIR` overrides that location for the window and for a whole test
 //! binary. The headless seams (`app::collect_once`, `App::save_now_to`) additionally take the
 //! directory as an argument, so tests running side by side never share one file.
+//!
+//! Two things this module guarantees about that file, because the app reads it at every start and
+//! writes it on a timer: a part that cannot be read costs only that part (see `PersistedIn` and
+//! `MAX_HISTORY_DEPTH`), and a save that is interrupted costs nothing (see `write_atomically`).
 
 use crate::app::{AppOptions, TargetKind};
 use std::path::PathBuf;
@@ -127,6 +131,61 @@ struct PersistedIn {
     window: Option<serde_json::Value>,
 }
 
+/// Largest state file this app reads.
+///
+/// Not a limit anyone is meant to reach: a real one is a few hundred kilobytes even with years of
+/// samples, and this is 32 MiB. It is here because reading a file into a string has no bound of its
+/// own otherwise, and this file is read at every start — a wrong state directory pointing at some
+/// other program's data, a disk that filled mid-write into something absurd, or a file written on
+/// purpose would otherwise be pulled into memory whole before the window has even appeared.
+const MAX_STATE_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The file's text, or `None`: absent, unreadable, or bigger than `max_bytes` (the app passes
+/// [`MAX_STATE_FILE_BYTES`]; a test passes something small to exercise the same path).
+///
+/// The oversize case is the one worth a line on stderr, because it is indistinguishable from "no
+/// settings yet" otherwise — and a person who has collected measurements for a year and sees the
+/// default list deserves to be told the file was refused rather than pretend it was never there.
+fn read_state(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    let len = std::fs::metadata(path).ok()?.len();
+    if len > max_bytes {
+        eprintln!(
+            "{} is {len} bytes, more than the {max_bytes} bytes this app reads; starting without saved settings",
+            path.display()
+        );
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+/// Deepest nesting one history element may have.
+///
+/// Counted in JSON containers inside the element: a saved target is an object, its `samples` an
+/// array, one sample a pair — three. Anything deeper is not a damaged target, it is not a target, and
+/// dropping that one element keeps the rest of the list, which is the same rule [`part`] applies to
+/// the parts of the file.
+///
+/// This is the policy half. The stack half is already bounded by the parser itself: serde_json stops
+/// nesting at 128 levels and reports an error instead of running out of stack, and that limit is only
+/// lifted by a feature this crate does not enable. Because of that bound, walking a value's depth
+/// recursively is safe — no value that got this far can be deeper than 128.
+const MAX_HISTORY_DEPTH: usize = 6;
+
+/// How many containers deep this value goes, counting itself.
+fn depth_of(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Array(xs) => 1 + deepest(xs.iter()),
+        serde_json::Value::Object(map) => 1 + deepest(map.values()),
+        _ => 1,
+    }
+}
+
+/// The deepest of a set of values, or 0 for none — so a container reports its own level and not one
+/// more than it has to.
+fn deepest<'a>(xs: impl Iterator<Item = &'a serde_json::Value>) -> usize {
+    xs.map(depth_of).max().unwrap_or(0)
+}
+
 /// One part of the file, or `None` when it is absent or cannot be read in this version's terms. Costs
 /// that part and nothing else (see [`PersistedIn`]).
 fn part<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> Option<T> {
@@ -135,11 +194,17 @@ fn part<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> Option
 }
 
 /// The entries of a history that may not be a list at all. Unreadable *elements* are dropped further
-/// down, one at a time, by [`from_value`].
+/// down, one at a time, by [`from_value`]; absurdly nested ones are dropped here, before anything is
+/// built out of them (see [`MAX_HISTORY_DEPTH`]).
 fn items(v: &Option<serde_json::Value>) -> Vec<serde_json::Value> {
     v.as_ref()
         .and_then(|v| v.as_array())
-        .cloned()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| depth_of(row) <= MAX_HISTORY_DEPTH)
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -172,7 +237,7 @@ pub fn load_with_window(
     dir: &std::path::Path,
 ) -> (AppOptions, Vec<SavedTarget>, Option<WindowGeom>) {
     let path = state_path_in(dir);
-    if let Ok(text) = std::fs::read_to_string(&path) {
+    if let Some(text) = read_state(&path, MAX_STATE_FILE_BYTES) {
         if let Ok(p) = serde_json::from_str::<PersistedIn>(&text) {
             let opts = part(&p.options).unwrap_or_default();
             let rows = items(&p.history);
@@ -270,7 +335,39 @@ pub fn save_window_to(
         window,
     };
     let text = serde_json::to_string_pretty(&p).unwrap_or_default();
-    std::fs::write(&path, text)
+    write_atomically(&path, text.as_bytes())
+}
+
+/// Puts `bytes` at `path` in a way that leaves a readable file behind no matter when the process
+/// stops.
+///
+/// The new contents go to a sibling name, are handed to the disk, and only then are moved onto the
+/// real name. Written straight over the old file — which is what `fs::write` does — a power failure
+/// or a kill halfway through leaves the file the next start reads truncated or half one JSON object,
+/// and the app comes up with default settings and no history. That is the whole reason for the
+/// detour: the app saves on a timer and on every change, so there is always a save in progress.
+///
+/// The temporary name carries the process id, because two instances of the app may point at the same
+/// folder and must not write each other's half-built file. If the move fails, the leftover is
+/// removed and the error is handed to the caller, which reports it the way it reports any failed
+/// save. The real file, untouched, is still the last good one.
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| STATE_FILE.to_string());
+    let tmp = path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+
+    let mut file = std::fs::File::create(&tmp)?;
+    let written = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
+    // Closed before the move: on Windows a file still open here cannot be renamed over the target.
+    drop(file);
+
+    let moved = written.and_then(|()| std::fs::rename(&tmp, path));
+    if moved.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    moved
 }
 
 #[cfg(test)]
@@ -430,6 +527,86 @@ mod tests {
         let (opts, saved, geom) = load_with_window(&dir);
         assert_eq!((saved.len(), geom), (0, None));
         assert_eq!(opts.horizon_secs, want.horizon_secs);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file too big to be this app's own settings is refused instead of being read.
+    ///
+    /// The size limit is handed to [`read_state`] as an argument rather than read from the constant
+    /// inside it for exactly this test: the real limit is 32 MiB, and writing 33 of them into the
+    /// temp folder to prove one line of code works is not a test anyone runs twice.
+    #[test]
+    fn a_file_that_is_too_big_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("system-ping-size-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = state_path_in(&dir);
+        std::fs::write(&path, r#"{"version":2,"history":[]}"#).unwrap();
+
+        assert!(
+            read_state(&path, u64::MAX).is_some(),
+            "the file is readable"
+        );
+        assert!(read_state(&path, 8).is_none(), "…but not past its limit");
+        // A missing file is not an error worth printing: that is the normal first start.
+        assert!(read_state(&dir.join("nowhere.json"), u64::MAX).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A history element that nests deeper than the format ever goes costs that element and nothing
+    /// else — the same rule as [`a_broken_options_block_costs_only_the_options`], one level down.
+    /// The stack itself is already safe (serde_json refuses to nest past 128 levels), so this is
+    /// about keeping the rows that are good rather than about not crashing.
+    #[test]
+    fn a_history_element_that_nests_too_deeply_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("system-ping-depth-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let deep = "[".repeat(MAX_HISTORY_DEPTH + 4) + &"]".repeat(MAX_HISTORY_DEPTH + 4);
+        std::fs::write(
+            state_path_in(&dir),
+            format!(
+                r#"{{"version":2,"history":[{deep},
+                    {{"id":2,"label":"b","host":"8.8.8.8","kind":"Dns","enabled":true,"color_idx":1,"samples":[[1,2.0]]}}]}}"#,
+            ),
+        )
+        .unwrap();
+
+        let (_, saved, _) = load_with_window(&dir);
+        assert_eq!(saved.len(), 1, "the sane row survives the insane one");
+        assert_eq!(saved[0].label, "b");
+        assert_eq!(saved[0].samples.len(), 1, "and its samples are intact");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Saves are written to a sibling name and moved onto the real one, so the folder after a save
+    /// holds nothing a person would not recognise — and garbage from a run that died mid-save stays
+    /// garbage rather than turning into a second settings file.
+    #[test]
+    fn a_save_leaves_no_temporary_file_behind() {
+        let dir = std::env::temp_dir().join(format!("system-ping-atomic-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let opts = AppOptions::default();
+        let geom = WindowGeom {
+            x: 1,
+            y: 2,
+            width: 800.0,
+            height: 600.0,
+        };
+
+        save_to(&dir, &opts, &[]).unwrap();
+        save_window_to(&dir, &opts, &[], Some(&geom)).unwrap();
+        let extras: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+            .filter(|name| name != STATE_FILE)
+            .collect();
+        assert!(extras.is_empty(), "unexpected files: {extras:?}");
+
+        std::fs::write(dir.join(format!("{STATE_FILE}.1234.tmp")), "half a file").unwrap();
+        assert_eq!(load_with_window(&dir).2, Some(geom));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
