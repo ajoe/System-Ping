@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The template app/macos/bundle.sh copies into a finished bundle as Contents/Info.plist, so the
+  two @VERSION@ places are filled from [package] version in Cargo.toml and this file never carries
+  a version of its own.
+
+  macOS reads this file to decide what a folder ending in .app is: a program of its own, which the
+  system starts without anything in front of it. That is the only reason a bundle is needed at all.
+  The binary from `cargo build --release` is a bare Mach-O, which is a public.unix-executable, and
+  Terminal.app has claimed exactly that type as its "Shell" role - so LaunchServices answers a
+  double click on the binary, or an `open` on it, with a terminal window running the program. In a
+  bundle the program is the thing being opened, and no terminal appears anywhere.
+-->
+<plist version="1.0">
+<dict>
+	<!-- What the user reads: the bold first entry of the app menu, the Dock's right-click title,
+	     the name under the icon in Finder. Dashed, like the crate and the repository. -->
+	<key>CFBundleName</key>
+	<string>System-Ping</string>
+	<key>CFBundleDisplayName</key>
+	<string>System-Ping</string>
+
+	<!-- The program inside Contents/MacOS/, which the script copies there under this name. -->
+	<key>CFBundleExecutable</key>
+	<string>system-ping</string>
+
+	<!-- Reverse way of the repository's address. It is the identity macOS files preferences and
+	     permission grants under, so it has to stay the same across versions; only the folder next
+	     to the program travels. Nothing of the app depends on this string - the state folder comes
+	     from `platform::statedir` and is ~/Library/Application Support/system-ping in both shapes. -->
+	<key>CFBundleIdentifier</key>
+	<string>com.github.ajoe.system-ping</string>
+
+	<!-- APPL = "this folder is an application", which is what separates it from a plugin or a
+	     droplet in the eyes of the system. -->
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+
+	<!-- The file icon, next to the program in Contents/Resources/. macOS has no place inside a
+	     binary for an icon the way a Windows .exe does (see app/build.rs), so this is the one
+	     place it can live; the icon for the window while running is separate and embedded in
+	     main.rs from assets/icon.png. -->
+	<key>CFBundleIconFile</key>
+	<string>icon.icns</string>
+
+	<!-- Draw at the real pixel count of the display. Without this a program linked against an
+	     older SDK is asked to render at half size and gets blurred by the system; egui asks for
+	     the scale factor itself and would draw correctly if it were asked. -->
+	<key>NSHighResolutionCapable</key>
+	<true/>
+
+	<!-- Only used by the App Store and by Finder's "Kind" column; the value is what a latency
+	     monitor is. No LSMinimumSystemVersion: nothing here asks for anything newer than what
+	     every Mac that can build this crate runs, and a guessed number in that key only ever
+	     locks somebody out of an app that would have worked. -->
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+</dict>
+</plist>

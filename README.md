@@ -36,6 +36,7 @@ cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
 cargo test                   # 104 Tests (38 Unit- + 66 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
+./macos/bundle.sh            # nur macOS: -> app/target/macos/System-Ping.app (siehe unten)
 ```
 
 Andere Systeme lassen sich von Hand prüfen (Typ-Check, ohne deren Bibliotheken zu binden):
@@ -58,7 +59,7 @@ Alles, was ein Betriebssystem anders macht, sitzt abgesondert in `app/src/platfo
 | Ping-Aufruf | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <ms>` |
 | Gateway erraten | `route print`, sonst `ipconfig` | `ip route show`, sonst `netstat -rn` | `route -n get default`, sonst `netstat -rn` |
 | Autostart | `HKCU\...\Run` | nicht angeboten | nicht angeboten |
-| Dateisymbol | in die `.exe` eingebettet | `.desktop`-Eintrag (nicht umgesetzt) | `.icns` im Bundle (nicht umgesetzt) |
+| Dateisymbol | in die `.exe` eingebettet | `.desktop`-Eintrag (nicht umgesetzt) | `.icns` im Bundle (`app/macos/bundle.sh`) |
 
 Fehlende Funktionen sagen `false`/`None` statt so zu tun, als gäbe es sie: Der Autostart-Knopf
 in der Kopfzeile und das Kontrollkästchen in den Einstellungen erscheinen auf Linux und macOS
@@ -77,10 +78,44 @@ macht `build.rs` deshalb nichts — dort reist das Symbol als Datei neben dem Pr
 cargo build --release   # .res entsteht in app/target/release/build/system-ping/*/out/
 ```
 
+Das Dateisymbol des Mac-Bündels entsteht zur gleichen Zeit aus `assets/icon.png`:
+`app/macos/bundle.sh` erzeugt daraus mit `sips` und `iconutil` ein `icon.icns` (16/32/64/128/256 px,
+ohne hochskalierte Größen über 256 px) und legt es in `System-Ping.app/Contents/Resources/`.
+
 Das Fenstersymbol zur Laufzeit ist unabhängig davon direkt in `main.rs` eingebettet
 (`assets/icon.png`), damit auch `cargo run` auf jedem System ein Symbol zeigt.
 
 [`winresource`]: https://crates.io/crates/winresource
+
+### Mac: ein Bündel statt eines nackten Programms
+
+`target/release/system-ping` ist eine Mach-O-Datei und damit für macOS eine ausführbare Datei wie
+ein Shell-Skript. Wer sie im Finder doppelt oder `open` darauf setzt, bekommt deshalb kein
+Programmfenster, sondern Terminal: Terminal.app hat sich für genau diesen Dateityp als „Shell“
+gemeldet und startet das Programm darin. Ein Terminal-Fenster, das beim Start aufgeht, ist also kein
+Verhalten des Programms — es hat selbst keinen Terminal-Start (der `windows_subsystem`-Schalter in
+`main.rs` betrifft nur Windows).
+
+Richtig startet der Mac das Programm als Bündel. `app/macos/bundle.sh` baut es aus dem fertigen
+Binary — ohne weiteres Werkzeug als die Command Line Tools, ohne Änderung am Programm selbst:
+
+```sh
+cd app
+cargo build --release          # oder: ./macos/bundle.sh, das den Aufbau gleich mitmacht
+./macos/bundle.sh              # -> app/target/macos/System-Ping.app
+open target/macos/System-Ping.app
+```
+
+Was das Skript in `app/target/macos/` zusammenlegt, ist der Ordner, den ein Doppelklick im Finder
+öffnet: die Programmdatei in `Contents/MacOS/`, die aus `macos/Info.plist` gemachte
+`Contents/Info.plist` mit Version und Name aus `Cargo.toml`, das `icon.icns` dazu, eine Ad-hoc-
+Signatur und die Anmeldung beim LaunchServices-Dienst, damit das neue Symbol nicht erst nach einer
+Weile im Dock ankommt. `--no-build` nimmt den fertigen Binary, wenn es schnell gehen soll.
+
+Am Programm ändert das nichts: Der Zustandsordner bleibt auf macOS
+`~/Library/Application Support/system-ping` (`app/src/platform/statedir.rs`), Ziele, Verlauf und
+Fensterlage sind also in beiden Startarten dieselben. Zum Installieren genügt ein
+`cp -R app/target/macos/System-Ping.app /Applications`.
 
 ## Benutzen
 
@@ -403,7 +438,8 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
 
 * `app/` — Crate (Quellcode in `app/src`, darunter `app/src/platform/` für alles
   Betriebssystem-spezifische, GUI-freie Tests in `app/tests`, `build.rs` für die
-  Windows-Ressourcen, Screenshots in `app/shots`)
+  Windows-Ressourcen, `macos/` für das Mac-Bündel (`bundle.sh` und `Info.plist`),
+  Screenshots in `app/shots`)
 * `assets/` — `icon.ico` (Dateisymbol) und `icon.png` (Fenstersymbol zur Laufzeit)
 * `reference/` — Screenshots des Vorbilds und eigene Vergleichsbilder
 * `capture/` — Hinweise zum Referenzmaterial

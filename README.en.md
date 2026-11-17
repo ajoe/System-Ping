@@ -36,6 +36,7 @@ cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
 cargo test                   # 104 tests (38 unit + 66 integration, no GUI)
 cargo clippy --all-targets   # clean
+./macos/bundle.sh            # macOS only: -> app/target/macos/System-Ping.app (see below)
 ```
 
 Other systems can be checked by hand (type check only, without binding their libraries):
@@ -58,7 +59,7 @@ never asks which system it is on:
 | ping call | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <ms>` |
 | gateway guess | `route print`, else `ipconfig` | `ip route show`, else `netstat -rn` | `route -n get default`, else `netstat -rn` |
 | autostart | `HKCU\...\Run` | not offered | not offered |
-| file icon | embedded in the `.exe` | `.desktop` entry (not implemented) | `.icns` in a bundle (not implemented) |
+| file icon | embedded in the `.exe` | `.desktop` entry (not implemented) | `.icns` in a bundle (`app/macos/bundle.sh`) |
 
 Missing features answer `false`/`None` instead of pretending: on Linux and macOS the autostart
 button in the top bar and the checkbox in the settings do not appear at all, and the settings screen
@@ -77,10 +78,44 @@ the icon travels as a file next to the program.
 cargo build --release   # the .res appears in app/target/release/build/system-ping/*/out/
 ```
 
+The file icon of the macOS bundle is made from `assets/icon.png` at the same time:
+`app/macos/bundle.sh` turns it into an `icon.icns` with `sips` and `iconutil` (16/32/64/128/256 px,
+nothing above 256 px invented by upscaling) and puts it in `System-Ping.app/Contents/Resources/`.
+
 The window icon at runtime is independent of that and embedded directly in `main.rs`
 (`assets/icon.png`), so `cargo run` shows an icon on every system too.
 
 [`winresource`]: https://crates.io/crates/winresource
+
+### macOS: a bundle instead of a bare program
+
+`target/release/system-ping` is a Mach-O file, which to macOS is an executable in the same sense as
+a shell script. Double clicking it in Finder, or putting `open` on it, therefore does not bring up
+the program's window but Terminal: Terminal.app has claimed exactly that file type as its “Shell”
+role and runs the program inside itself. A terminal window that opens at launch is thus not the
+program's doing — it never starts a shell itself (the `windows_subsystem` switch in `main.rs` only
+concerns Windows).
+
+A Mac starts the program properly as a bundle, and `app/macos/bundle.sh` builds one from the finished
+binary — with nothing beyond the command line tools, and with nothing in the program changed:
+
+```sh
+cd app
+cargo build --release          # or: ./macos/bundle.sh, which builds it as part of the run
+./macos/bundle.sh              # -> app/target/macos/System-Ping.app
+open target/macos/System-Ping.app
+```
+
+What the script assembles in `app/target/macos/` is the folder a double click in Finder opens: the
+program in `Contents/MacOS/`, the `Contents/Info.plist` made from `macos/Info.plist` with the name
+and version taken from `Cargo.toml`, that `icon.icns` next to it, an ad-hoc signature, and a report
+to the LaunchServices service so the new icon does not take a while to reach the Dock. `--no-build`
+takes the binary that is already there when it has to be quick.
+
+None of this touches the program: on macOS the state folder stays
+`~/Library/Application Support/system-ping` (`app/src/platform/statedir.rs`), so both ways of
+starting it find the same targets, history and window place. To install it,
+`cp -R app/target/macos/System-Ping.app /Applications` is enough.
 
 ## Using it
 
@@ -383,8 +418,8 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
 ## Folders
 
 * `app/` — the crate (sources in `app/src`, including `app/src/platform/` for everything
-  OS-specific, GUI-free tests in `app/tests`, `build.rs` for the Windows resources, screenshots in
-  `app/shots`)
+  OS-specific, GUI-free tests in `app/tests`, `build.rs` for the Windows resources, `macos/` for the
+  Mac bundle (`bundle.sh` and `Info.plist`), screenshots in `app/shots`)
 * `assets/` — `icon.ico` (file icon) and `icon.png` (window icon at runtime)
 * `reference/` — screenshots of the original and own comparison pictures
 * `capture/` — notes about the reference material
