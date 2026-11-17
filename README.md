@@ -34,7 +34,7 @@ macOS braucht nur die Command Line Tools (`xcode-select --install`). Unter Windo
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 92 Tests (32 Unit- + 60 Integrationstests, ohne GUI)
+cargo test                   # 97 Tests (33 Unit- + 64 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -163,8 +163,13 @@ gültigen Platz — oberhalb der Mitte einer Zeile landet man vor ihr, darunter 
 der Lücke zwischen zwei Zeilen direkt an dieser Grenze. Die Reihenfolge ist dieselbe, die im
 Zustandsfile steht, also nach einem Neustart wieder da. Ein Ziel, dessen Editor offen ist, lässt
 sich nicht ziehen: das Formular hat Vorrang, und ein Drop auf ihm wird absichtlich verworfen,
-sonst würde ein Feld des Formulars getroffen. Abgelassene Klicks zählen nicht als Klick auf die
-Zeile — wer zieht, öffnet dabei keinen Editor.
+sonst würde ein Feld des Formulars getroffen. Ob eine Zeile Klick oder Zug ist, entscheidet dabei
+egui selbst — die Hand darf beim Ziehen über sechs Punkte vom Ausgangspunkt abweichen, sonst war es
+ein Klick. Wer zieht, öffnet dabei also keinen Editor, und wer beim Klicken leicht abrutscht,
+verschiebt noch nichts. `app/tests/drag_order.rs` prüft beide Fälle mit je zwei verschiedenen Punk-
+ten für Druck und Loslassen; einer der Tests (`a_drag_released_far_from_where_it_began_...`) ist
+genau wegen des Abrutschens schon einmal durchgerutscht, weil dort beide Male derselbe Punkt ge-
+nommen wurde.
 
 ## Sprache: eine Tabelle, zwei Sprachen
 

@@ -108,17 +108,39 @@ pub struct Persisted<'a> {
     pub window: Option<&'a WindowGeom>,
 }
 
-/// Read shape: `history` is read as raw JSON because v1 and v2 disagree about what a sample
-/// pair means, and that difference cannot be expressed with one typed struct.
+/// Read shape: every part is kept as raw JSON. Two reasons, and both are about not losing more than a
+/// file deserves to lose. `history` is raw because v1 and v2 disagree about what a sample pair means,
+/// and that difference cannot be expressed with one typed struct. The others are raw because a typed
+/// struct fails as a whole: an `options` block this version cannot read — one field dropped by a hand
+/// edit, one type changed by a newer app — would otherwise take the measurement history with it, which
+/// is the opposite of what a settings file is for. Each part is read on its own terms (see [`part`]),
+/// so only the file as a whole staying JSON is a hard requirement.
 #[derive(serde::Deserialize)]
 struct PersistedIn {
     #[serde(default)]
-    version: u32,
-    options: Option<AppOptions>,
+    version: Option<serde_json::Value>,
     #[serde(default)]
-    history: Vec<serde_json::Value>,
+    options: Option<serde_json::Value>,
     #[serde(default)]
-    window: Option<WindowGeom>,
+    history: Option<serde_json::Value>,
+    #[serde(default)]
+    window: Option<serde_json::Value>,
+}
+
+/// One part of the file, or `None` when it is absent or cannot be read in this version's terms. Costs
+/// that part and nothing else (see [`PersistedIn`]).
+fn part<T: serde::de::DeserializeOwned>(v: &Option<serde_json::Value>) -> Option<T> {
+    v.as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+}
+
+/// The entries of a history that may not be a list at all. Unreadable *elements* are dropped further
+/// down, one at a time, by [`from_value`].
+fn items(v: &Option<serde_json::Value>) -> Vec<serde_json::Value> {
+    v.as_ref()
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Where `load`/`save` read and write. Checked on every call so a test can point it
@@ -152,24 +174,22 @@ pub fn load_with_window(
     let path = state_path_in(dir);
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Ok(p) = serde_json::from_str::<PersistedIn>(&text) {
-            let opts = p.options.unwrap_or_default();
-            let history = match p.version {
-                2..=u32::MAX => p
-                    .history
-                    .iter()
-                    .filter_map(from_value::<SavedTarget>)
-                    .collect(),
-                // Anything else (including a missing field) is the old format.
-                _ => p
-                    .history
+            let opts = part(&p.options).unwrap_or_default();
+            let rows = items(&p.history);
+            // A version this version cannot read as a number is treated like a missing one: the old
+            // format, which is the shape every file from before version 2 has.
+            let history = match part(&p.version).unwrap_or(1u32) {
+                2..=u32::MAX => rows.iter().filter_map(from_value::<SavedTarget>).collect(),
+                _ => rows
                     .iter()
                     .filter_map(from_value::<SavedTargetV1>)
                     .map(SavedTarget::from_v1)
                     .collect(),
             };
             // A geometry that fails `sane` is treated as absent, so the caller falls back to the
-            // default size instead of trying to honour a broken number.
-            let window = p.window.filter(|g| g.sane());
+            // default size instead of trying to honour a broken number. Named here rather than left
+            // to inference: `part` is generic, and `sane` alone does not tell it which part to read.
+            let window = part(&p.window).filter(|g: &WindowGeom| g.sane());
             return (opts, history, window);
         }
     }
@@ -347,6 +367,69 @@ mod tests {
         };
         save_window_to(&dir, &opts, &[], Some(&junk)).unwrap();
         assert_eq!(load_with_window(&dir).2, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One unreadable part of the file may cost that part and nothing else. The case that prompted
+    /// this is small and easy to hit: an options block that does not spell out every setting — written
+    /// by hand, or left with one setting by a newer app that has since renamed the others. Read as one
+    /// typed struct, such a block fails, and the failure used to reach the whole file: the measurement
+    /// history came back empty, which is the one thing a settings file must never do to data a person
+    /// cannot type again.
+    #[test]
+    fn a_broken_options_block_costs_only_the_options() {
+        let dir = std::env::temp_dir().join(format!("system-ping-parts-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            state_path_in(&dir),
+            r#"{
+                "version": 2,
+                "options": { "interval_secs": "one second", "horizon_secs": 600.0 },
+                "history": [
+                    { "id": 1, "label": "a", "host": "1.1.1.1", "kind": "Dns", "enabled": true, "color_idx": 0, "samples": [] },
+                    { "id": 2, "label": "b", "host": "8.8.8.8", "kind": "Dns", "enabled": true, "color_idx": 1, "samples": [] }
+                ],
+                "window": { "x": 10, "y": 20, "width": 800.0, "height": 600.0 }
+            }"#,
+        )
+        .unwrap();
+
+        let (opts, saved, geom) = load_with_window(&dir);
+        let want = AppOptions::default();
+        assert_eq!(
+            saved.len(),
+            2,
+            "both measured targets have to survive an unreadable settings block"
+        );
+        assert_eq!(
+            (opts.interval_secs, opts.horizon_secs),
+            (want.interval_secs, want.horizon_secs),
+            "an options block this version cannot read falls back to the built-in settings"
+        );
+        assert_eq!(
+            geom.map(|g| (g.x, g.y)),
+            Some((10, 20)),
+            "the rest of the file is still honoured"
+        );
+
+        // The other direction: a block that is merely incomplete, not wrong. Everything it does say is
+        // kept, so a file written by another version of the app does not reset a person's settings just
+        // because it does not know about the newest one.
+        std::fs::write(
+            state_path_in(&dir),
+            r#"{"version":2,"options":{"horizon_secs":30.0},"history":[]}"#,
+        )
+        .unwrap();
+        let (opts, _, _) = load_with_window(&dir);
+        assert_eq!(opts.horizon_secs, 30.0);
+        assert_eq!(opts.interval_secs, want.interval_secs);
+
+        // And a file that is not JSON at all stays a default app rather than taking the program down.
+        std::fs::write(state_path_in(&dir), "not json").unwrap();
+        let (opts, saved, geom) = load_with_window(&dir);
+        assert_eq!((saved.len(), geom), (0, None));
+        assert_eq!(opts.horizon_secs, want.horizon_secs);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

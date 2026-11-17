@@ -418,6 +418,13 @@ pub struct DragSelfTest {
     app: App,
     /// Passes with no pointer movement since the last one; the run ends once enough have piled up.
     idle: usize,
+    /// Whether the pointer has been inside the window at least once. Idle only starts counting after
+    /// that, because a watcher nobody has come back to yet is not a watcher that is done.
+    seen_pointer: bool,
+    /// Whether the row strips have been printed yet. They only exist after a pass that drew them, so
+    /// this is written on the first pass that can answer — which is what lets a script aim at a row by
+    /// reading the log instead of guessing where the list happens to start.
+    rows_logged: bool,
 }
 
 impl DragSelfTest {
@@ -429,7 +436,12 @@ impl DragSelfTest {
         // The watcher drives its own frames and must not race the sampler.
         app.running = false;
         eprintln!("DRAGWATCH: drag a row in the list; the window closes when you stop.");
-        Self { app, idle: 0 }
+        Self {
+            app,
+            idle: 0,
+            seen_pointer: false,
+            rows_logged: false,
+        }
     }
 }
 
@@ -443,6 +455,13 @@ impl eframe::App for DragSelfTest {
             .collect::<Vec<_>>();
         // Where egui believes the pointer is, and what our own layout says about that point. Both are printed because a
         // disagreement between them is precisely the bug being hunted: egui's hit test versus `App::row_rects`.
+        //
+        // The three answers from egui are the gesture's own decision points, so they are printed as egui gives them and not as
+        // our code later interprets them. `hit` is the widget a press belongs to — it names a row from the moment the button
+        // goes down, which is what keeps the editor off a press that turns into a pull. `drag` only appears once the pointer has
+        // left egui's slop, and `stop` marks the single pass in which a drop can be measured. A press that reads `hit=Some` then
+        // never `drag=` is a click; one that reads `drag=Some` then `stop=Some` is a pull, and the order printed on that same line
+        // is what the drop had to work from.
         let seen = root.ctx().input(|i| {
             (
                 i.pointer.hover_pos(),
@@ -452,21 +471,41 @@ impl eframe::App for DragSelfTest {
             )
         });
         let rows = self.app.target_row_rects();
+        let egui_says = crate::ui::gesture_report(root.ctx());
+        // Once, as soon as they exist: the strips in list order. A script that wants to drive this
+        // gesture needs a place to press, and these are the only numbers that say where a row really
+        // stands — the window's own position and the panel's height both move.
+        if !self.rows_logged && !rows.is_empty() {
+            self.rows_logged = true;
+            let dump = rows
+                .iter()
+                .map(|r| {
+                    format!(
+                        "[{:.0},{:.0}..{:.0},{:.0}]",
+                        r.min.x, r.min.y, r.max.x, r.max.y
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("DRAGWATCH rows {dump}");
+        }
         match seen.0 {
             Some(pos) => {
                 let row = rows.iter().position(|r| r.contains(pos));
                 eprintln!(
-                    "DRAGWATCH ptr=[{:.0},{:.0}] delta=[{:.1},{:.1}] down={} row={:?} drag={:?} order={:?}",
+                    "DRAGWATCH ptr=[{:.0},{:.0}] delta=[{:.1},{:.1}] down={} row={:?} {} ours={:?} order={:?}",
                     pos.x,
                     pos.y,
                     seen.2.x,
                     seen.2.y,
                     seen.1,
                     row,
+                    egui_says,
                     self.app.drag_row,
                     order
                 );
                 // Movement keeps the run alive; a still pointer means the person is done.
+                self.seen_pointer = true;
                 if seen.2 == egui::Vec2::ZERO && !seen.1 {
                     self.idle += 1;
                 } else {
@@ -475,14 +514,18 @@ impl eframe::App for DragSelfTest {
             }
             None => {
                 eprintln!("DRAGWATCH no pointer, rows={:?}", rows.len());
-                self.idle += 1;
+                // Only a hand that has been here and left counts as "the person is done"; before the
+                // first pass with a pointer the watcher is simply waiting to be used.
+                if self.seen_pointer {
+                    self.idle += 1;
+                }
             }
         }
 
         self.app.frame_ui(root);
-        let ctx = root.ctx();
 
-        if self.idle > 240 {
+        let ctx = root.ctx();
+        if self.idle > 300 {
             eprintln!("DRAGWATCH final order: {:?}", order);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

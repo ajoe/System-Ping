@@ -34,7 +34,7 @@ macOS only needs the command line tools (`xcode-select --install`). On Windows,
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 92 tests (32 unit + 60 integration, no GUI)
+cargo test                   # 97 tests (33 unit + 64 integration, no GUI)
 cargo clippy --all-targets   # clean
 ```
 
@@ -160,8 +160,12 @@ marks the row. Letting go decides the final place — above another row's middle
 of it, below its middle behind it, and in the gap between two rows exactly at that boundary. The
 order is the one written to the state file, so it survives a restart. A target whose editor is
 open cannot be dragged: the form has priority, and a drop onto it is deliberately refused — other-
-wise it would hit one of the form's fields. A click released after a drag does not count as a
-click on the row, so dragging never opens an editor by accident.
+wise it would hit one of the form's fields. Whether a press on a row is a click or a pull is egui's
+own call, not ours: the hand may wander up to six points from where it pressed and still count as a
+click, so dragging never opens an editor by accident and a click that slips a little never moves
+the list. `app/tests/drag_order.rs` checks both cases with two *different* points for press and
+release; one of them (`a_drag_released_far_from_where_it_began_...`) exists because pressing and
+releasing at the same point is exactly what let this gesture ship broken once.
 
 ## Language: one table, two languages
 

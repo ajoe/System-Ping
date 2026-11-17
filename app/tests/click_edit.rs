@@ -73,12 +73,21 @@ fn row_rect(app: &App, row: usize) -> Rect {
         .unwrap_or_else(|| panic!("row for target {id} was never reported as a rect"))
 }
 
-/// A full click at `spot`: move the pointer there, press, release. The pointer rests inside the
-/// row the whole time, otherwise egui reports no click.
+/// A full click at `spot`: move the pointer there, press, and let go a little way off.
+///
+/// The two points are deliberately not the same one. egui calls a finished press a click as long as the pointer stayed inside
+/// `InputOptions::max_click_dist` of where it began — six points — and a hand that goes back to the exact pixel it pressed on is
+/// something no real hand does. Releasing at the press point therefore tested a case the app never sees: it hid a version of the
+/// gesture in which a pull answered "no click" for every row, so nothing recognised the drag and the editor opened on whatever row
+/// the pointer happened to finish over. Two points three apart are still well inside the slop, so this remains a click, but now with
+/// the wobble a click really has — and if the app ever stops trusting egui's own verdict and starts measuring positions again, this
+/// is what fails.
 fn click_at(ctx: &Context, app: &mut App, spot: Pos2, t0: f64) {
     pass(ctx, app, t0, vec![Event::PointerMoved(spot)]);
     pass(ctx, app, t0 + 0.02, vec![press(spot)]);
-    pass(ctx, app, t0 + 0.04, vec![release(spot)]);
+    let lifted = spot + Vec2::new(3.0, 1.0);
+    pass(ctx, app, t0 + 0.03, vec![Event::PointerMoved(lifted)]);
+    pass(ctx, app, t0 + 0.04, vec![release(lifted)]);
 }
 
 /// A fresh app with the built-in targets (Gateway, DNS, Internet) in a throwaway state dir.
