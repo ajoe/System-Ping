@@ -16,7 +16,15 @@ pub const ENV_DIR: &str = "SYSTEM_PING_STATE_DIR";
 /// Where to look for the files if nothing is forced. Never fails: when even the home folder is
 /// unknown, the temporary folder will do — losing history on a reboot is better than not starting.
 pub fn default_dir() -> PathBuf {
-    match std::env::var_os(ENV_DIR) {
+    dir_for(std::env::var_os(ENV_DIR))
+}
+
+/// The same decision, made from a value handed in instead of read from the environment. Split out
+/// because the tests for it must not touch the variable itself: two tests setting and removing one
+/// process-wide variable from parallel threads overwrite each other, and that is exactly how the
+/// macOS CI job lost a unit test that had passed for months.
+fn dir_for(forced: Option<std::ffi::OsString>) -> PathBuf {
+    match forced {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => os_default_dir(),
     }
@@ -91,23 +99,23 @@ mod tests {
     use super::*;
 
     /// The forced folder wins over everything — this is the seam every test relies on, so it has to
-    /// hold on all three systems.
+    /// hold on all three systems. Asked of `dir_for` directly, not of the environment: these tests
+    /// run in parallel threads of one process, and a variable set here would be read (and removed)
+    /// by the test next door at the same moment. That is how this test used to fail on CI while
+    /// passing locally.
     #[test]
     fn env_var_wins() {
-        // Set in-process: the variable is only read by these calls, and no other thread of a unit
-        // test reads it (the integration tests use their own process).
-        std::env::set_var(ENV_DIR, std::env::temp_dir().join("sp-env-wins"));
-        assert!(default_dir().ends_with("sp-env-wins"));
-        std::env::remove_var(ENV_DIR);
+        let forced = std::env::temp_dir().join("sp-env-wins");
+        assert_eq!(dir_for(Some(forced.as_os_str().to_os_string())), forced);
     }
 
     /// An empty `SYSTEM_PING_STATE_DIR=` must not turn into the current directory, which is what
-    /// `PathBuf::from("")` would mean.
+    /// `PathBuf::from("")` would mean. The answer must be the same one an unset variable gives.
     #[test]
     fn empty_env_var_is_ignored() {
-        std::env::set_var(ENV_DIR, "");
-        assert_ne!(default_dir(), PathBuf::from(""));
-        std::env::remove_var(ENV_DIR);
+        let empty = dir_for(Some(std::ffi::OsString::new()));
+        assert_ne!(empty, PathBuf::from(""));
+        assert_eq!(empty, dir_for(None), "empty is as good as unset");
     }
 
     /// The data folder is the application's own — not the shared OS folder itself. Otherwise the
