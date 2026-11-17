@@ -2537,7 +2537,7 @@ fn default_targets() -> Vec<Target> {
     vec![
         Target::new(0, "Gateway", gateway_hint(), TargetKind::Gateway),
         Target::new(1, "DNS (Google)", "8.8.8.8", TargetKind::Dns),
-        Target::new(2, "Internet", "1.1.1.1", TargetKind::Internet),
+        Target::new(2, "DNS (Cloudflare)", "1.1.1.1", TargetKind::Dns),
     ]
 }
 

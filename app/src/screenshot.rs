@@ -378,7 +378,7 @@ impl eframe::App for SelfTest {
                     .count();
                 ok_samples += ok;
                 println!(
-                    "collect: {:<14} {:<20} samples={} replies={} last={}",
+                    "collect: {:<17} {:<20} samples={} replies={} last={}",
                     t.label,
                     t.host,
                     t.series.len(),

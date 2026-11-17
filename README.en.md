@@ -211,9 +211,9 @@ without looking at the screen:
 
 ```
 $ app\target\release\system-ping.exe --collect 10
-collect: Gateway        192.168.178.1        samples=5 replies=5 last=1.0 ms
-collect: DNS (Google)   8.8.8.8              samples=5 replies=5 last=13.0 ms
-collect: Internet       1.1.1.1              samples=5 replies=5 last=10.0 ms
+collect: Gateway          192.168.178.1       samples=5 replies=5 last=1.0 ms
+collect: DNS (Google)     8.8.8.8             samples=5 replies=5 last=13.0 ms
+collect: DNS (Cloudflare) 1.1.1.1             samples=5 replies=5 last=10.0 ms
 collect: 15 measurements in this time, 15 of them replies
 ```
 
