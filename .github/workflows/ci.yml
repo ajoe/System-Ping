@@ -36,9 +36,13 @@ jobs:
             apt: ""
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    # The steps below are bash scripts (`if [ … ]`, `case`, `test -s`). On a Windows runner the
+    # default shell is PowerShell, which reads those lines as its own language and stops at the
+    # second character — so the shell is said out loud instead of left to the runner.
     defaults:
       run:
         working-directory: app
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 

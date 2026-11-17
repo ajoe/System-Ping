@@ -31,6 +31,10 @@ env:
 jobs:
   version:
     runs-on: ubuntu-latest
+    # bash everywhere, including the Windows runner — see the note in the build job's defaults.
+    defaults:
+      run:
+        shell: bash
     outputs:
       # One source of truth for the number: app/Cargo.toml, which is also what the title bar, the
       # "about" text and the macOS Info.plist read.
@@ -75,9 +79,13 @@ jobs:
             target: aarch64-apple-darwin
             apt: ""
     runs-on: ${{ matrix.os }}
+    # The steps below are bash scripts (`if [ … ]`, `case`, `test -s`). On a Windows runner the
+    # default shell is PowerShell, which reads those lines as its own language and stops at the
+    # second character — so the shell is said out loud instead of left to the runner.
     defaults:
       run:
         working-directory: app
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
