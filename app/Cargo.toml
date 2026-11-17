@@ -9,18 +9,27 @@ license = "MIT"
 # GUI: eframe/egui (glow-Backend, eigene Software-Rasterung fuer Screenshots).
 #
 # The crate builds for Windows, Linux and macOS. `default-features = false` is deliberate:
-# eframe's defaults add accesskit and a screen reader, which are not used here and pull in more
-# platform code than the app needs. `glow` keeps one renderer on every OS — no Metal or Vulkan
-# backend to get right per platform. The display back ends (wayland/x11) matter on Linux only;
-# Windows and macOS ignore them, so listing them costs nothing there and keeps one feature list
-# for all three instead of a table of cfg-specific variants.
-eframe = { version = "0.31", default-features = false, features = [
+# eframe's defaults add the wgpu renderer, OS accessibility (accesskit_winit), a web screen
+# reader, persisted window state and system-font lookup — none of which this app uses, and all of
+# them platform code that has to build on every OS. `glow` keeps one renderer on every OS — no
+# Metal or Vulkan backend to get right per platform. The display back ends (wayland/x11) matter on
+# Linux only; Windows and macOS ignore them, so listing them costs nothing there and keeps one
+# feature list for all three instead of a table of cfg-specific variants.
+#
+# `clipboard` is in the list on purpose: without it egui-winit has no clipboard, and Ctrl+C/Ctrl+V
+# in the host field would silently do nothing. It is off in eframe's defaults only for the web.
+#
+# Note that the plain `accesskit` crate (data types for accessibility, no OS bridge) is a
+# mandatory dependency of egui itself since 0.37 and cannot be switched off; only the bridge that
+# hands a tree to the screen reader is behind the `accesskit` feature, which stays off.
+eframe = { version = "0.37", default-features = false, features = [
+    "clipboard",
     "glow",
     "default_fonts",
     "wayland",
     "x11",
 ] }
-egui = "0.31"
+egui = "0.37"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

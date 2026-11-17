@@ -299,6 +299,10 @@ fn app_tick_collects_data_into_its_charts() {
         }
     }
     assert_eq!(logged, fresh);
+    // `replies` is only inspected by the check below, and that one needs the reference probe,
+    // which exists on Windows only. Everywhere else the counter would count as unused.
+    #[cfg(not(windows))]
+    let _ = replies;
     #[cfg(windows)]
     if system_ping::ping::probe_blocking("127.0.0.1", 2000).is_ok() {
         assert!(
@@ -322,6 +326,9 @@ fn app_tick_collects_data_into_its_charts() {
         .iter()
         .filter(|t| dead_words.iter().any(|w| t.contains(w)))
         .collect();
+    // Same as with `replies` above: only a Windows run compares these with `ping.exe`.
+    #[cfg(not(windows))]
+    let _ = failures;
     // Only a machine where the reference probe answers can prove the app agrees with it;
     // elsewhere ICMP itself is broken and there is nothing to compare against.
     #[cfg(windows)]
@@ -522,15 +529,17 @@ fn window_frames_fill_the_charts() {
     app.targets.clear();
     app.add_named_target("127.0.0.1", "loopback");
 
-    // A real egui context, the same type eframe hands to `update`. Nothing is shown, so no
-    // window appears; `run` just lays out and paints the panels into a shape list.
+    // A real egui context, the same type eframe builds the root `Ui` from. Nothing is shown, so
+    // no window appears; a pass just lays out and paints the panels into a shape list.
     let ctx = egui::Context::default();
     app.start();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
     let mut frames = 0usize;
     while std::time::Instant::now() < deadline {
-        // One frame, painted inside a real egui pass — the same shape `update` has.
-        let out = ctx.run(egui::RawInput::default(), |c| app.frame(c));
+        // One frame, painted inside a real egui pass — the same shape a window's repaint has.
+        let out = system_ping::headless::paint(&ctx, egui::RawInput::default(), |root| {
+            app.frame_ui(root)
+        });
         frames += 1;
         assert!(
             !out.shapes.is_empty(),

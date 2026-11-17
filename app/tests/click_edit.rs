@@ -21,7 +21,7 @@ fn viewport() -> Rect {
 /// One egui pass with the given events. `t` keeps egui's clock strictly increasing: egui stores a
 /// pointer history and asserts that time never runs backwards.
 ///
-/// `Context::run` repeats its internal pass while the layout still changes, and every repeat
+/// `Context::run_ui` repeats its internal pass while the layout still changes, and every repeat
 /// consumes the input — so a press would be forgotten before the release arrives. The option set
 /// in the tests below pins it to exactly one pass per call, which is what makes a press in one
 /// call and a release in the next behave like a real mouse click.
@@ -35,9 +35,9 @@ fn pass(ctx: &Context, app: &mut App, t: f64, events: Vec<Event>) {
     };
     raw.screen_rect = Some(viewport());
     // The `FullOutput` is not interesting here; the app state after the pass is.
-    let _ = ctx.run(raw, |c| {
-        // Draw the real app: this is what fills `app.row_rects` for the next pass.
-        app.frame(c);
+    let _ = system_ping::headless::paint(ctx, raw, |root| {
+        // Draw the real app: this is what lays out the target rows for the next pass.
+        app.frame_ui(root);
     });
 }
 

@@ -12,11 +12,11 @@ use egui::{
 use std::path::PathBuf;
 
 /// Draws one frame of the whole window.
-pub fn draw(ctx: &egui::Context, app: &mut App) {
-    top(ctx, app);
-    bottom(ctx, app);
-    left(ctx, app);
-    center(ctx, app);
+pub fn draw(ui: &mut egui::Ui, app: &mut App) {
+    top(ui, app);
+    bottom(ui, app);
+    left(ui, app);
+    center(ui, app);
 }
 
 /// The same for the two target fields of the settings "Targets" group: their own salts, because the
@@ -58,19 +58,19 @@ const NEW_LABEL_ID_SALT: &str = "new_label_field";
 /// The two rows of controls above the panels. They are deliberately kept apart: the first row is
 /// "what the app does" (title, new target, start/stop), the second is "what is on screen" (view,
 /// filter). Cramped together they wrapped into each other at the minimum window width.
-pub fn top(ctx: &egui::Context, app: &mut App) {
+pub fn top(ui: &mut egui::Ui, app: &mut App) {
     let lang = app.lang();
     let m = app.theme_mode;
     // Set when something worth persisting changed; the state is written once at the end of the
     // panel so a click on a category chip cannot be lost until the next autosave.
     let mut save_now = false;
-    egui::TopBottomPanel::top("title_bar")
+    egui::Panel::top("title_bar")
         .frame(
             egui::Frame::new()
-                .fill(ctx.style().visuals.window_fill)
+                .fill(ui.style().visuals.window_fill)
                 .inner_margin(egui::Margin::symmetric(10, 6)),
         )
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             // Row 1: title and horizon on the left, start/stop on the far right. Nothing here
             // takes input, so the row stays one clean line at any window width.
             ui.horizontal(|ui| {
@@ -93,7 +93,7 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
                     });
                 let _ = combo.response.on_hover_text(lang.tip_horizon());
                 if ui
-                    .add(egui::SelectableLabel::new(
+                    .add(egui::Button::selectable(
                         app.follow_live,
                         if app.follow_live {
                             "● Live"
@@ -324,7 +324,7 @@ pub fn top(ctx: &egui::Context, app: &mut App) {
     if save_now {
         app.save_now();
     }
-    short_cuts(ctx, app);
+    short_cuts(ui.ctx(), app);
 }
 
 /// The keyboard: view numbers, start/stop, pan, escape. Drawn after the top bar so it sees the same
@@ -392,15 +392,15 @@ fn short_cuts(ctx: &egui::Context, app: &mut App) {
 }
 
 /// The left panel: heading, count, and one row per target.
-pub fn left(ctx: &egui::Context, app: &mut App) {
-    egui::SidePanel::left("targets")
-        .exact_width(250.0)
+pub fn left(ui: &mut egui::Ui, app: &mut App) {
+    egui::Panel::left("targets")
+        .exact_size(250.0)
         .frame(
             egui::Frame::new()
-                .fill(ctx.style().visuals.panel_fill)
+                .fill(ui.style().visuals.panel_fill)
                 .inner_margin(egui::Margin::same(8)),
         )
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             left_body(ui, app);
             // A colour chosen in the editor is a per-target setting, so it is not covered by the
             // autosave that watches `AppOptions`. It still has to survive a restart.
@@ -470,7 +470,7 @@ const GRIP_W: f32 = 10.0;
 /// widget by id — an index would name whatever row happens to sit there now, while an id follows the
 /// entry.
 pub fn strip_id(target_id: usize) -> Id {
-    Id::new(("system_ping", "target_row_strip", target_id))
+    Id::unique(("system_ping", "target_row_strip", target_id))
 }
 
 /// Where the pointer let go of a row. `None` on every pass that held no release, which is most of them.
@@ -971,14 +971,14 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                         [215.0, 20.0],
                         egui::TextEdit::singleline(&mut app.edit_label)
                             .hint_text(lang.hint_new_label())
-                            .vertical_align(egui::Align::Center),
+                            .align(egui::Align2::LEFT_CENTER),
                     );
                     ui.add_sized(
                         [215.0, 20.0],
                         egui::TextEdit::singleline(&mut app.edit_host)
                             .hint_text(lang.hint_address())
                             .font(FontId::monospace(12.5))
-                            .vertical_align(egui::Align::Center),
+                            .align(egui::Align2::LEFT_CENTER),
                     );
 
                     // Category and whether to measure it at all.
@@ -1431,19 +1431,19 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
     app.stats_scratch = scratch;
 }
 
-pub fn bottom(ctx: &egui::Context, app: &mut App) {
+pub fn bottom(ui: &mut egui::Ui, app: &mut App) {
     let lang = app.lang();
     let m = app.theme_mode;
     // Taken out of the app so it can be reused while `app.targets` is borrowed. The old
     // `stats()` window started at the newest sample and had no upper bound.
     let mut scratch = std::mem::take(&mut app.stats_scratch);
-    egui::TopBottomPanel::bottom("status_bar")
+    egui::Panel::bottom("status_bar")
         .frame(
             egui::Frame::new()
-                .fill(ctx.style().visuals.window_fill)
+                .fill(ui.style().visuals.window_fill)
                 .inner_margin(egui::Margin::symmetric(10, 4)),
         )
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let dot = m.run_dot(app.running);
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
@@ -1550,13 +1550,13 @@ pub fn bottom(ctx: &egui::Context, app: &mut App) {
     app.stats_scratch = scratch;
 }
 
-pub fn center(ctx: &egui::Context, app: &mut App) {
-    center_ex(ctx, app, false);
+pub fn center(ui: &mut egui::Ui, app: &mut App) {
+    center_ex(ui, app, false);
 }
 
 /// `shot_frame` lets the seeded example history through the "only live samples" rule in
 /// `chart`, so a still picture can show a full trace without pretending to be pinging.
-pub fn center_ex(ctx: &egui::Context, app: &mut App, shot_frame: bool) {
+pub fn center_ex(ui: &mut egui::Ui, app: &mut App, shot_frame: bool) {
     let m = app.theme_mode;
     egui::CentralPanel::default()
         .frame(
@@ -1564,7 +1564,7 @@ pub fn center_ex(ctx: &egui::Context, app: &mut App, shot_frame: bool) {
                 .fill(m.plot_fill())
                 .inner_margin(egui::Margin::same(8)),
         )
-        .show(ctx, |ui| match app.view {
+        .show(ui, |ui| match app.view {
             View::Chart => chart(ui, app, shot_frame),
             View::Events => events_view(ui, app),
             View::Stats => stats_view(ui, app),
@@ -1710,15 +1710,29 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     // familiar rather than turning them into a continuum of odd fractions.
     // The plot is the central panel, so "the pointer is over the plot" is exactly "the pointer is
     // inside the panel's rect and no other widget has taken it".
-    let zoom = ui.ctx().input(|i| {
+    let zoom: f32 = ui.ctx().input(|i| {
         let Some(pos) = i.pointer.hover_pos() else {
             return 0.0;
         };
-        if rect.contains(pos) {
-            i.raw_scroll_delta.y
-        } else {
-            0.0
+        if !rect.contains(pos) {
+            return 0.0;
         }
+        // egui 0.37 no longer keeps the unsmoothed scroll delta: `smooth_scroll_delta` spreads one
+        // mouse-wheel notch over several passes, and the ladder below is stepped per notch. So the
+        // plot reads this pass's wheel events — the same numbers egui used to add up into
+        // `raw_scroll_delta`, in points.
+        let per_line = egui::InputOptions::default().line_scroll_speed;
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                    egui::MouseWheelUnit::Line => per_line * delta.y,
+                    egui::MouseWheelUnit::Point => delta.y,
+                    egui::MouseWheelUnit::Page => i.content_rect().height() * delta.y,
+                }),
+                _ => None,
+            })
+            .sum::<f32>()
     });
     if zoom.abs() > 0.5 && rect.width() > 1.0 {
         let u = ((resp.hover_pos().unwrap_or(rect.center()).x - rect.left()) as f64
@@ -2904,8 +2918,8 @@ fn settings(ui: &mut Ui, app: &mut App) {
                 let mut pending_label: Option<String> = None;
                 let mut drop_host = false;
                 let mut drop_label = false;
-                let host_id = ui.id().with(SETTINGS_HOST_ID_SALT);
-                let label_id = ui.id().with(SETTINGS_LABEL_ID_SALT);
+                let host_id = ui.scope_id().with(SETTINGS_HOST_ID_SALT);
+                let label_id = ui.scope_id().with(SETTINGS_LABEL_ID_SALT);
                 let mut take =
                     |id: egui::Id| app.settings_target_ids.remove(&id).unwrap_or_default();
                 let host_key = ui.input(|i| i.key_pressed(egui::Key::Enter));

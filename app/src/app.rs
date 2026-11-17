@@ -637,15 +637,15 @@ pub struct App {
     pub window_geom: Option<store::WindowGeom>,
 }
 
-/// The window's place as egui sees it: `screen_rect` is the content area in logical points, and
+/// The window's place as egui sees it: `content_rect` is the content area in logical points, and
 /// `pixels_per_point` relates that to the physical pixels [`eframe::egui::ViewportBuilder`] wants
 /// for its position. Together they round-trip through the state file without a winit handle, which
 /// `eframe::App::on_exit` does not offer.
 ///
-/// A window that is hidden or minimised reports an empty screen rect; `WindowGeom::sane` rejects
+/// A window that is hidden or minimised reports an empty content rect; `WindowGeom::sane` rejects
 /// that, so such a pass simply does not update the remembered place.
 pub fn window_geom(ctx: &egui::Context) -> Option<store::WindowGeom> {
-    let (rect, ppu) = ctx.input(|i| (i.screen_rect(), i.pixels_per_point()));
+    let (rect, ppu) = ctx.input(|i| (i.content_rect(), i.pixels_per_point()));
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         // A hidden or minimised window reports an empty area; keep whatever was last good.
         return None;
@@ -664,33 +664,37 @@ impl App {
     /// One frame of the live window: advance the engine, then paint. This is the whole
     /// measurement loop of the GUI — `tick` is what schedules probes and moves results into
     /// the series the chart draws, so a frame that skips it paints an empty plot forever.
-    /// It lives here (and not only in `eframe::App::update`) so a test can drive a real frame
-    /// without a window.
-    pub fn frame(&mut self, ctx: &egui::Context) {
-        // Remembered on every pass because `on_exit` has no window handle of its own; the last
+    /// It lives here (and not only in `eframe::App::ui`) so a test can drive a real frame
+    /// without a window: egui hands the root `Ui` of a pass out of
+    /// [`egui::Context::run_ui`], and that is what the tests pass in.
+    pub fn frame_ui(&mut self, ui: &mut egui::Ui) {
+        // Checked on every pass because `on_exit` has no window handle of its own; the last
         // frame before the close is what puts the window back next time. Cheap, and a hidden
-        // window reports no screen rect (see `window_geom`).
-        self.window_geom = window_geom(ctx);
+        // window reports no content rect (see `window_geom`).
+        self.window_geom = window_geom(ui.ctx());
         let now = self.engine.elapsed_secs();
         self.tick(now);
         // The "clear measurements" warning lapses on its own, also when the view is elsewhere or
         // nothing is clicked. Checked per frame so no repaint has to be forced for it.
         self.expire_clear_armed();
-        crate::ui::draw(ctx, self);
+        crate::ui::draw(ui, self);
         // A live monitor repaints even when nobody touches it: samples arrive on their own,
         // and egui would otherwise sit idle until the next mouse event.
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let want = crate::theme::resolve(ctx, &self.options.theme);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // A look chosen in the settings has to be installed before anything is painted, or the
+        // frame would use the old accent colours for one pass.
+        let want = crate::theme::resolve(ui.ctx(), &self.options.theme);
         if want != self.theme_mode {
             self.theme_mode = want;
-            crate::theme::apply(ctx, want);
+            crate::theme::apply(ui.ctx(), want);
         }
-        self.frame(ctx);
+        self.frame_ui(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -950,7 +954,10 @@ impl App {
             window_geom: None,
             // Placeholder until the top bar has been drawn once, which happens before any key can
             // reach the fields.
-            new_target_ids: [egui::Id::new("unset_host"), egui::Id::new("unset_label")],
+            new_target_ids: [
+                egui::Id::unique("unset_host"),
+                egui::Id::unique("unset_label"),
+            ],
             settings_target_ids: HashMap::new(),
             protocol: if protocol_on {
                 let path = if trimmed_path.is_empty() {

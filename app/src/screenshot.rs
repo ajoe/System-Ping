@@ -31,9 +31,13 @@ pub struct Screencap {
     frames_left: u32,
     done: bool,
     seeded: usize,
+    /// The context the picture is rendered in. Deliberately not the window's own context: a
+    /// second egui pass inside the pass `eframe` is already running would have to borrow the
+    /// root `Ui` twice, so the capture runs in a context of its own, sized like the window.
+    cap_ctx: egui::Context,
     /// The last fully drawn frame, taken from egui's own output.
     shapes: Vec<ClippedPrimitive>,
-    /// Our own monotone clock for egui; see `update`. The largest time handed to egui so far,
+    /// Our own monotone clock for egui; see [`Screencap::ui`]. The largest time handed to egui so far,
     /// in seconds. Kept so a stalled wall clock can be detected; unused for now.
     #[allow(dead_code)]
     last_egui_time: f64,
@@ -52,6 +56,11 @@ impl Screencap {
         theme::apply(&cc.egui_ctx, app.theme_mode);
         // Fixed surface so the shot is reproducible.
         cc.egui_ctx.set_pixels_per_point(1.0);
+        // The capture context: same look, same scale, its own font atlas and its own pass
+        // state, so nothing here disturbs the window (see the field).
+        let cap_ctx = egui::Context::default();
+        theme::apply(&cap_ctx, app.theme_mode);
+        cap_ctx.set_pixels_per_point(1.0);
         // Deterministic picture: the seeded trace is the render, so no live probes may add
         // samples on top of it (that raced with `seed` and made renders differ per run).
         app.engine.stop_all();
@@ -62,6 +71,7 @@ impl Screencap {
             frames_left: 120,
             done: false,
             seeded: 0,
+            cap_ctx,
             shapes: Vec::new(),
             shot_frame: false,
             edit_row: None,
@@ -171,7 +181,7 @@ impl Screencap {
 
     /// Show one of the four views in the shot, or set the chart window from a length
     /// (`--shot out.png 24h`). Both happen before `seed` plants the history, because that
-    /// history is spread over whatever window is current (see `update`). The two can be
+    /// history is spread over whatever window is current (see [`Screencap::ui`]). The two can be
     /// combined — `settings 24h` pictures the settings panel of a day window.
     fn set_view(&mut self, name: &str) {
         for word in name.split_whitespace() {
@@ -191,7 +201,10 @@ impl Screencap {
 }
 
 impl eframe::App for Screencap {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The window's own context is only asked for its size and told to close; the picture is
+        // rendered in `cap_ctx` (see the field).
+        let ctx = root.ctx();
         if self.frames_left == 120 {
             // The view and the window length come from the command line and have to be in
             // place before the history is planted: `seed` spreads its samples over whatever
@@ -211,10 +224,10 @@ impl eframe::App for Screencap {
         // Draw inside a real egui output pass: `tessellate` only sees the last frame that
         // finished, and with a hidden window there is no vsync to force one.
         //
-        // The picture pass runs inside ONE `Context::run`, and the capture happens in that
-        // same pass. Earlier versions ran ~120 passes through eframe and kept the last
-        // tessellated frame; egui then asserted "Time shouldn't move backwards" inside a value
-        // history, because `InputState::begin_pass` derives its clock as
+        // The picture pass runs inside ONE `Context::run_ui` on `cap_ctx`, and the capture
+        // happens in that same pass. Earlier versions ran ~120 passes through eframe and kept
+        // the last tessellated frame; egui then asserted "Time shouldn't move backwards" inside
+        // a value history, because `InputState::begin_pass` derives its clock as
         // `new.time.unwrap_or(self.time + new.predicted_dt as f64)` — with `time: None` and
         // `predicted_dt: 0.0` every pass was stamped with the very same instant, so any value
         // history that egui itself keeps (drag/animation machinery) hit the monotonicity
@@ -223,6 +236,10 @@ impl eframe::App for Screencap {
         if self.frames_left == 120 {
             self.shot_frame = true;
         }
+
+        // The window's size in logical points: the picture has to be the surface the window is
+        // showing, and this is the one place that knows it.
+        let rect = ctx.input(|i| i.viewport().inner_rect);
 
         // Warm-up pass, then the picture pass — two passes, not one and not 120.
         //
@@ -242,42 +259,42 @@ impl eframe::App for Screencap {
         // after the picture pass, so there is no third stamp to get wrong.
         if self.frames_left == 120 {
             let mut warm = egui::RawInput::default();
-            if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            if let Some(rect) = rect {
                 warm.screen_rect = Some(rect);
             }
             warm.time = Some(self.clock);
             warm.predicted_dt = 0.016;
             self.clock += 0.016;
-            let _ = ctx.run(warm, |c| {
-                ui::top(c, &mut self.app);
-                ui::left(c, &mut self.app);
-                ui::center_ex(c, &mut self.app, false);
-                ui::bottom(c, &mut self.app);
+            let _ = crate::headless::paint(&self.cap_ctx, warm, |ui| {
+                ui::top(ui, &mut self.app);
+                ui::left(ui, &mut self.app);
+                ui::center_ex(ui, &mut self.app, false);
+                ui::bottom(ui, &mut self.app);
             });
         }
 
         let mut raw = egui::RawInput::default();
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+        if let Some(rect) = rect {
             raw.screen_rect = Some(rect);
         }
         raw.time = Some(self.clock);
         raw.predicted_dt = 0.016;
         self.clock += 0.016;
-        let out = ctx.run(raw, |c| {
-            ui::top(c, &mut self.app);
-            ui::left(c, &mut self.app);
+        let out = crate::headless::paint(&self.cap_ctx, raw, |ui| {
+            ui::top(ui, &mut self.app);
+            ui::left(ui, &mut self.app);
             // The picture pass is the one that gets captured, so it has to be the pass with
             // the seeded history in it.
-            ui::center_ex(c, &mut self.app, self.shot_frame);
-            ui::bottom(c, &mut self.app);
+            ui::center_ex(ui, &mut self.app, self.shot_frame);
+            ui::bottom(ui, &mut self.app);
         });
 
-        // Keep the tessellated frame: eframe hands its own draw list to glow and never
-        // gives it back, so this is the only copy we can raster ourselves. `shot_frame` is
+        // Keep the tessellated frame: this program has no way to read a framebuffer back, so the
+        // only picture it can save is the one made from egui's own draw list. `shot_frame` is
         // still on for the picture pass, so the seeded history is inside these shapes.
         if !out.shapes.is_empty() {
-            let ppp = ctx.pixels_per_point();
-            self.shapes = ctx.tessellate(out.shapes, ppp);
+            let ppp = out.pixels_per_point;
+            self.shapes = self.cap_ctx.tessellate(out.shapes, ppp);
         }
 
         self.frames_left = self.frames_left.saturating_sub(1);
@@ -288,7 +305,7 @@ impl eframe::App for Screencap {
             self.shot_frame = false;
             self.done = true;
             let path = self.path.clone();
-            match capture(ctx, &self.shapes, &path) {
+            match capture(&self.cap_ctx, rect, &self.shapes, &path) {
                 Ok((w, h)) => println!(
                     "screenshot: {}x{} -> {} (seeded samples: {})",
                     w,
@@ -337,9 +354,10 @@ impl SelfTest {
 }
 
 impl eframe::App for SelfTest {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // The real frame of the real window.
-        self.app.frame(ctx);
+        self.app.frame_ui(root);
+        let ctx = root.ctx();
 
         self.frames_left = self.frames_left.saturating_sub(1);
         let time_up = crate::runtime::secs_since_start() >= self.until_secs;
@@ -416,7 +434,7 @@ impl DragSelfTest {
 }
 
 impl eframe::App for DragSelfTest {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let order = self
             .app
             .targets
@@ -425,7 +443,7 @@ impl eframe::App for DragSelfTest {
             .collect::<Vec<_>>();
         // Where egui believes the pointer is, and what our own layout says about that point. Both are printed because a
         // disagreement between them is precisely the bug being hunted: egui's hit test versus `App::row_rects`.
-        let seen = ctx.input(|i| {
+        let seen = root.ctx().input(|i| {
             (
                 i.pointer.hover_pos(),
                 i.pointer.any_down(),
@@ -461,7 +479,8 @@ impl eframe::App for DragSelfTest {
             }
         }
 
-        self.app.frame(ctx);
+        self.app.frame_ui(root);
+        let ctx = root.ctx();
 
         if self.idle > 240 {
             eprintln!("DRAGWATCH final order: {:?}", order);
@@ -478,23 +497,23 @@ impl eframe::App for DragSelfTest {
 
 /* ------------------------------------------------------------------ raster */
 
+/// Rasterises one tessellated frame into a PNG. `surface` is the window the picture stands in
+/// for; `cap` supplies the look, which is what the framebuffer has to start on.
 fn capture(
-    ctx: &egui::Context,
+    cap: &egui::Context,
+    surface: Option<Rect>,
     shapes: &[ClippedPrimitive],
     path: &PathBuf,
 ) -> Result<(u32, u32), String> {
-    let size = ctx.input(|i| {
-        i.viewport()
-            .inner_rect
-            .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(1080.0, 700.0)))
-    });
-    let size = size.size();
+    let size = surface
+        .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(1080.0, 700.0)))
+        .size();
     let w = size.x.max(64.0) as u32;
     let h = size.y.max(64.0) as u32;
     // The framebuffer starts on the theme's background, not black: egui only tessellates
     // what a panel paints over its own fill, and a `CentralPanel` leaves the rest of the
     // window to the viewport clear colour, which this raster has to supply itself.
-    let bg = ctx.style().visuals.panel_fill; // the viewport clear colour: panels only paint their own rects
+    let bg = cap.global_style().visuals.panel_fill; // the viewport clear colour: panels only paint their own rects
     let mut img = RgbaImage::from_pixel(w, h, image::Rgba([bg.r(), bg.g(), bg.b(), 255]));
 
     for clipped in shapes {

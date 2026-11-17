@@ -492,10 +492,10 @@ pub fn apply(ctx: &egui::Context, mode: Mode) {
     ] {
         state.fg_stroke.color = mode.text_normal();
     }
-    // Input fields: the caret in the normal colour instead of egui's light-blue default. (The type
-    // itself is not re-exported by egui 0.31, so only the field is reachable — which is enough to
-    // change the stroke.) The placeholder of an empty field does not need its own colour: egui
-    // paints it with `weak_text_color()`, i.e. this look's black or white, faded a little.
+    // Input fields: the caret in the normal colour instead of egui's light-blue default. (The style
+    // struct behind this field is not re-exported by egui, so only the field is reachable — which is
+    // enough to change the stroke.) The placeholder of an empty field does not need its own colour:
+    // egui paints it with `weak_text_color()`, i.e. this look's black or white, faded a little.
     visuals.text_cursor.stroke = Stroke::new(1.5_f32, mode.text_cursor());
     visuals.override_text_color = None;
     // Marked text: the look's own text colour would be invisible on the selection background, so
@@ -504,7 +504,7 @@ pub fn apply(ctx: &egui::Context, mode: Mode) {
     visuals.selection.stroke = Stroke::new(1.0_f32, mode.selection_text());
 
     style.visuals = visuals;
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 /// Decide which look to use for this frame.
@@ -513,7 +513,7 @@ pub fn resolve(ctx: &egui::Context, override_name: &str) -> Mode {
         "light" | "hell" | "bright" => Mode::Light,
         "dark" | "dunkel" => Mode::Dark,
         _ => {
-            if ctx.style().visuals.dark_mode {
+            if ctx.global_style().visuals.dark_mode {
                 Mode::Dark
             } else {
                 Mode::Light

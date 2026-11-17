@@ -20,8 +20,8 @@ use std::sync::OnceLock;
 use egui::{Context, Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 use system_ping::app::App;
 
-/// One egui pass with the given events, drawing the real app so `app.row_rects` is filled for the
-/// next one. See `click_edit.rs` for why exactly one internal pass is needed here.
+/// One egui pass with the given events, drawing the real app so the pass that follows sees the
+/// layout this one produced. See `click_edit.rs` for why exactly one internal pass is needed here.
 fn pass(ctx: &Context, app: &mut App, t: f64, events: Vec<Event>) {
     let mut raw = RawInput {
         events,
@@ -32,7 +32,7 @@ fn pass(ctx: &Context, app: &mut App, t: f64, events: Vec<Event>) {
     // Wider than the target panel's 250 points on purpose: a viewport that narrow leaves no room for
     // a central panel, and egui then lays the side panel out differently than in a real window.
     raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(760.0, 600.0)));
-    let _ = ctx.run(raw, |c| app.frame(c));
+    let _ = system_ping::headless::paint(ctx, raw, |root| app.frame_ui(root));
 }
 
 fn press(at: Pos2) -> Event {

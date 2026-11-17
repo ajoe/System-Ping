@@ -12,7 +12,7 @@ use system_ping::theme::{self, Mode, BLACK_TEXT, WHITE_TEXT};
 fn style_for(mode: Mode) -> Style {
     let ctx = Context::default();
     theme::apply(&ctx, mode);
-    (*ctx.style()).clone()
+    (*ctx.global_style()).clone()
 }
 
 /// Every text slot egui picks a colour from must hold the look's own black or white. A widget that

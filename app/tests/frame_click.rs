@@ -40,8 +40,8 @@ fn pass(
     // The `FullOutput` that comes back is not interesting here; what matters is what the paint
     // closure saw.
     // The closure has to be able to run several times, so `draw` must not be moved into it.
-    let _ = ctx.run(raw, |c| {
-        egui::CentralPanel::default().show(c, |ui| draw(ui));
+    let _ = system_ping::headless::paint(ctx, raw, |root| {
+        egui::CentralPanel::default().show(root, |ui| draw(ui));
     });
 }
 

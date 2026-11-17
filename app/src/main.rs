@@ -267,8 +267,12 @@ fn main() -> eframe::Result<()> {
             // the saved inner position is used as-is and then clamped to a monitor below; on
             // Windows that offset is small and never leaves the window off screen.
             vp = vp.with_position([g.x as f32, g.y as f32]);
+            // The remembered size belongs to the live window only. `--shot` deliberately keeps the
+            // default above: the pictures in `app/shots/` are meant to come out the same on every
+            // machine, and a size read from this user's state file would make them depend on where
+            // somebody last dragged a window corner.
+            vp = vp.with_inner_size([g.width, g.height]);
         }
-        vp = vp.with_inner_size([g.width, g.height]);
     }
     if shot.is_some() {
         // Off-screen run: no window on the desktop while writing the PNG.

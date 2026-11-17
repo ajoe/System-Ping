@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod exporter;
+pub mod headless;
 pub mod history;
 pub mod i18n;
 pub mod ping;
