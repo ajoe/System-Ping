@@ -55,7 +55,7 @@ never asks which system it is on:
 | | Windows | Linux | macOS |
 | --- | --- | --- | --- |
 | state folder | next to the `.exe` (portable) | `$XDG_DATA_HOME/system-ping`, else `~/.local/share/system-ping` | `~/Library/Application Support/system-ping` |
-| ping call | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <s>` |
+| ping call | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <ms>` |
 | gateway guess | `route print`, else `ipconfig` | `ip route show`, else `netstat -rn` | `route -n get default`, else `netstat -rn` |
 | autostart | `HKCU\...\Run` | not offered | not offered |
 | file icon | embedded in the `.exe` | `.desktop` entry (not implemented) | `.icns` in a bundle (not implemented) |

@@ -15,6 +15,9 @@ marker.txt
 e85.txt
 v4.txt
 
+# macOS-Ordner-Merker
+.DS_Store
+
 # Zustand, den das Programm selbst schreibt
 app/system-ping-state.json
 app/protocol.csv

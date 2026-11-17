@@ -55,7 +55,7 @@ Alles, was ein Betriebssystem anders macht, sitzt abgesondert in `app/src/platfo
 | | Windows | Linux | macOS |
 | --- | --- | --- | --- |
 | Zustandsordner | neben der `.exe` (portabel) | `$XDG_DATA_HOME/system-ping`, sonst `~/.local/share/system-ping` | `~/Library/Application Support/system-ping` |
-| Ping-Aufruf | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <s>` |
+| Ping-Aufruf | `ping -n 1 -w <ms>` | `ping -c 1 -W <s>` | `ping -c 1 -W <ms>` |
 | Gateway erraten | `route print`, sonst `ipconfig` | `ip route show`, sonst `netstat -rn` | `route -n get default`, sonst `netstat -rn` |
 | Autostart | `HKCU\...\Run` | nicht angeboten | nicht angeboten |
 | Dateisymbol | in die `.exe` eingebettet | `.desktop`-Eintrag (nicht umgesetzt) | `.icns` im Bundle (nicht umgesetzt) |

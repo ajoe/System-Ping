@@ -7,7 +7,8 @@
 //! What differs between systems is narrow and specific, so it is kept narrow and specific here:
 //!
 //! * the arguments that mean "send exactly one request, give up after N" — Windows counts that wait
-//!   in milliseconds (`-w 1200`), Linux and macOS in whole seconds (`-W 2`);
+//!   in milliseconds (`-w 1200`) and so does macOS (`-W 1200`), only Linux counts it in whole
+//!   seconds (`-W 2`);
 //! * which word introduces the reply time. English `ping` prints `time=42ms`, German Windows prints
 //!   `Zeit=14ms`. Rather than guess one language, every system asks for both words: a program that
 //!   reads its own output is not affected by the machine's display language, and an extra word in
@@ -43,11 +44,8 @@ pub struct Plan {
 const TIME_WORDS: &[&str] = &["time", "Zeit"];
 
 /// Build the command line for one probe. `timeout_ms` is the whole budget for the probe; the wait
-/// the OS is told must fit inside it, which on Linux and macOS means rounding *up* to whole seconds
-/// and letting [`run`] cut the process off at its own deadline.
-/// Build the command line for one probe. `timeout_ms` is the whole budget for the probe; the wait
-/// the OS is told must fit inside it, which on Linux and macOS means rounding *up* to whole seconds
-/// and letting [`run`] cut the process off at its own deadline. The command name may be empty,
+/// the OS is told must fit inside it, which on Linux means rounding *up* to whole seconds and
+/// letting [`run`] cut the process off at its own deadline. The command name may be empty,
 /// which means "whatever `ping` this system has".
 pub fn plan(exe: &str, host: &str, timeout_ms: u32) -> Plan {
     #[cfg(windows)]
@@ -62,11 +60,26 @@ pub fn plan(exe: &str, host: &str, timeout_ms: u32) -> Plan {
         ]
     };
 
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     let args = {
-        // `-c 1` is one request. `-W` is the wait for a reply, in whole seconds on both Linux and
-        // macOS (the BSD and iputils spellings agree here); rounding up keeps a sub-second budget
-        // from turning into "wait for nothing".
+        // `-c 1` is one request. `-W` is the per-reply wait, and on macOS `man 8 ping` counts it
+        // in milliseconds — unlike the Linux flag of the same letter, which counts seconds. A
+        // seconds value here cuts the wait to a fraction of the budget: the reply then arrives
+        // "out of wait time", and such replies are counted in the statistics but never printed,
+        // so the `time=` line the parser needs is simply missing.
+        vec![
+            "-c".to_string(),
+            "1".to_string(),
+            "-W".to_string(),
+            timeout_ms.to_string(),
+            host.to_string(),
+        ]
+    };
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
+    let args = {
+        // `-c 1` is one request. `-W` is the wait for a reply, in whole seconds on Linux; rounding
+        // up keeps a sub-second budget from turning into "wait for nothing".
         let secs = ((timeout_ms as u64 + 999) / 1000).max(1).to_string();
         vec![
             "-c".to_string(),
@@ -336,8 +349,8 @@ mod tests {
         );
     }
 
-    /// The argument shapes are what the systems actually speak: milliseconds on Windows, whole
-    /// seconds elsewhere, and never a wait of zero.
+    /// The argument shapes are what the systems actually speak: milliseconds on Windows and macOS,
+    /// whole seconds on Linux, and never a wait of zero.
     #[test]
     fn plans_one_request_per_system() {
         let p = plan("ping", "8.8.8.8", 1200);
@@ -345,15 +358,18 @@ mod tests {
         assert_eq!(p.args.last().unwrap(), "8.8.8.8");
         #[cfg(windows)]
         assert_eq!(p.args, ["-n", "1", "-w", "1200", "8.8.8.8"]);
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        assert_eq!(p.args, ["-c", "1", "-W", "1200", "8.8.8.8"]);
+        #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
         assert_eq!(p.args, ["-c", "1", "-W", "2", "8.8.8.8"]);
 
-        // A sub-second budget must not round down to "wait for nothing". On Windows the wait is in
-        // milliseconds and needs no rounding at all, so the same budget is simply passed through.
+        // A sub-second budget must not round down to "wait for nothing". Where the wait is counted
+        // in milliseconds (Windows, macOS) it needs no rounding at all, so the same budget is
+        // simply passed through — both put the wait at argument 3.
         let p = plan("ping", "8.8.8.8", 250);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
         assert_eq!(&p.args[3], "250");
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
         assert_eq!(&p.args[3], "1");
     }
 
