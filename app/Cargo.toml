@@ -29,7 +29,13 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-egui = "0.37"
+# `monochrome_emoji_fonts` pulls in the symbol fallbacks (`NotoEmoji`, `emoji-icon-font`) that
+# eframe's `default_fonts` alone no longer carries since 0.37. Without them the ▶ on "Alle
+# starten", the ■ on "Alle stoppen" and the ⚐/⚑ of the pause button have no glyph in Ubuntu-Light
+# and render as empty boxes. eframe does not forward the feature, so it is set on egui directly;
+# feature unification hands it to epaint for the whole build. What those fonts still do not have is
+# in `theme::install_fonts`; the paragraph about symbols in the README tells the whole story.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

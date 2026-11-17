@@ -505,6 +505,35 @@ pub fn apply(ctx: &egui::Context, mode: Mode) {
 
     style.visuals = visuals;
     ctx.set_global_style(style);
+    install_fonts(ctx);
+}
+
+/// The fonts egui ships with, plus the fallback egui does not wire up.
+///
+/// Ubuntu-Light, the proportional font behind every word of the window, has letters, umlauts and
+/// dashes — and no symbol. The ones the strings in `i18n` and `ui` need come from the icon fonts
+/// that egui keeps as fallbacks (▶ and ■ from the emoji-icon font, ○ and ⚑ from the same place),
+/// but those do not carry everything either: the arrows of the shortcut table, the ● of "Live" and
+/// the ◉ of a marked row are only in Hack, the monospace font. Hack is already in `font_data`, so
+/// one line makes it the last fallback of the proportional family as well: egui then reaches for it
+/// for exactly those characters and never for a letter, because Ubuntu-Light answers first.
+///
+/// What no shipped font has at all stays out of the strings — see `tests/fonts.rs`, which reads
+/// every non-ascii character of `src` and asks the fonts of this very look whether they can draw it.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if !fonts.font_data.contains_key("Hack") {
+        // Without egui's `default_fonts` there is no Hack to fall back to, and nothing to do.
+        return;
+    }
+    let family = fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default();
+    if !family.iter().any(|name| name == "Hack") {
+        family.push("Hack".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 /// Decide which look to use for this frame.

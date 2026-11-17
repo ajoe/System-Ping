@@ -205,6 +205,18 @@ selectable label (the view buttons above, the category chips) therefore stayed g
 “▶ Start all” button next to it was correctly black. That is why such buttons in `ui::view_text`
 carry no `weak()`: what is active is said by the selection background and not by paler type.
 
+Symbols in the strings are a case of their own, because none of the fonts egui ships has them on its
+own: Ubuntu-Light, the proportional font behind every word, has letters, umlauts and dashes — and no
+▶. Since egui 0.37 the icon fonts (`NotoEmoji`, `emoji-icon-font`) sit behind the
+`monochrome_emoji_fonts` feature, and eframe does not switch it on, so it is set on the `egui` entry
+of `app/Cargo.toml`. What was still missing after that were the arrows of the shortcut table, the ●
+of “Live” and the ◉ of a marked row: those are only in Hack, the monospace font.
+`theme::install_fonts` appends Hack to the end of the proportional family, so those characters are
+answered by the monospace font while every letter stays Ubuntu-Light. The characters no shipped font
+has at all — ✕ ✓ ✗ ⌂ — are out of the strings and replaced by × ✔ ✖ 📁. `app/tests/fonts.rs` reads
+every non-ascii character of the strings in `src` and compares its glyph with the `.notdef` picture:
+a character without a glyph shows up in the test, not in the window.
+
 The window does **not** start measuring on its own — only “▶ Start all” (or the single button per
 target) fills the charts. `--collect` does it automatically and is the way to check the measurement
 without looking at the screen:

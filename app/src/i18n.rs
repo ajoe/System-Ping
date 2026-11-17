@@ -116,8 +116,8 @@ macro_rules! texts {
                               wird; Doppelklick ins Diagramm oder Esc schaltet es wieder ein" };
     (en tip_follow_live) => { "Follow the current time window — switches off when the chart is paged \
                              back; double-clicking the chart or pressing Esc turns it on again" };
-    (de data_folder_btn) => { "⌂ Daten" };
-    (en data_folder_btn) => { "⌂ Data" };
+    (de data_folder_btn) => { "📁 Daten" };
+    (en data_folder_btn) => { "📁 Data" };
     (de tip_data_folder) => { "Zustandsordner im Dateimanager öffnen (Datei, Protokoll, Exporte)" };
     (en tip_data_folder) => { "Open the state folder in the file manager (state file, protocol, exports)" };
     (de autostart_on) => { "Autostart: an" };
@@ -221,9 +221,9 @@ macro_rules! texts {
     (de why_hidden) => { "Alle Ziele sind ausgeblendet — klicke ihren Namen in der Legende an, um sie \
                         zurückzuholen." };
     (en why_hidden) => { "Every target is hidden — click its name in the legend to bring it back." };
-    (de why_filter) => { "Kein Ziel passt zum Textfilter oben rechts — mit ✕ oder einem leeren Feld \
+    (de why_filter) => { "Kein Ziel passt zum Textfilter oben rechts — mit × oder einem leeren Feld \
                         geht es weiter." };
-    (en why_filter) => { "No target matches the text filter at the top right — press ✕ or clear the \
+    (en why_filter) => { "No target matches the text filter at the top right — press × or clear the \
                         field to continue." };
     (de marker_outlier) => { "  <- Ausr." };
     (en marker_outlier) => { "  <- outlier" };
@@ -543,10 +543,10 @@ macro_rules! texts {
     (en remove_short) => { "remove" };
     (de edit_heading) => { "Bearbeiten" };
     (en edit_heading) => { "Edit" };
-    (de save_btn) => { "✓ Speichern" };
-    (en save_btn) => { "✓ Save" };
-    (de cancel_btn) => { "✗ Abbrechen" };
-    (en cancel_btn) => { "✗ Cancel" };
+    (de save_btn) => { "✔ Speichern" };
+    (en save_btn) => { "✔ Save" };
+    (de cancel_btn) => { "✖ Abbrechen" };
+    (en cancel_btn) => { "✖ Cancel" };
     (de values_span_fmt) => { "{replies}/{total} Werte · {avg}" };
     (en values_span_fmt) => { "{replies}/{total} values · {avg}" };
     (de tip_remove_fmt) => { "{label} entfernen" };

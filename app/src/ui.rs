@@ -240,7 +240,7 @@ pub fn top(ui: &mut egui::Ui, app: &mut App) {
                     [160.0, 22.0],
                     egui::TextEdit::singleline(&mut app.filter).hint_text(lang.hint_filter()),
                 );
-                if !app.filter.is_empty() && ui.button("✕").clicked() {
+                if !app.filter.is_empty() && ui.button("×").clicked() {
                     app.filter.clear();
                 }
                 // Categories double as a filter: a chip is on when its category is shown, and
@@ -1171,7 +1171,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .small_button("✕")
+                                .small_button("×")
                                 .on_hover_text(lang.tip_discard_edit())
                                 .clicked()
                             {

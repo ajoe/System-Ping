@@ -211,6 +211,19 @@ während der „▶ Alle starten“-Knopf daneben korrekt schwarz war. Deshalb t
 `ui::view_text` keinen `weak()`: was aktiv ist, sagt der Auswahlhintergrund und nicht eine blassere
 Schrift.
 
+Symbole in den Texten sind ein eigener Fall, denn keine der Schriften, die egui mitbringt, hat sie
+von sich aus: Ubuntu-Light, die proportionelle Schrift hinter jedem Wort, hat Buchstaben, Umlaute
+und Gedankenstriche — und kein ▶. Die Icon-Schriften (`NotoEmoji`, `emoji-icon-font`) sind seit
+egui 0.37 hinter das Feature `monochrome_emoji_fonts` gelegt, und eframe schaltet es nicht durch; es
+steht deshalb direkt am `egui`-Eintrag in `app/Cargo.toml`. Was danach noch fehlte, waren die Pfeile
+der Tastaturkürzel-Tabelle, das ● von „Live“ und das ◉ einer markierten Zeile: die liegen nur in
+Hack, der Monospace-Schrift. `theme::install_fonts` hängt Hack ans Ende der proportionellen Familie,
+somit spricht für diese Zeichen die Monospace-Schrift und für jeden Buchstaben weiterhin
+Ubuntu-Light. Zeichen, die keine der mitgebrachten Schriften hat — ✕ ✓ ✗ ⌂ — sind aus den Strings
+heraus und durch × ✔ ✖ 📁 ersetzt. `app/tests/fonts.rs` liest jeden Nicht-ASCII-Buchstaben der
+Strings in `src` und vergleicht seine Glyphe mit der `.notdef`-Glyphe: ein Zeichen ohne Glyphe fällt
+im Test auf und nicht erst im Fenster.
+
 Das Fenster startet **nicht** von selbst mit dem Messen — erst „▶ Alle starten“ (oder der
 einzelne Knopf pro Ziel) füllt die Diagramme. `--collect` macht das automatisch und ist der
 Weg, die Messung ohne Blick auf den Bildschirm zu prüfen:
