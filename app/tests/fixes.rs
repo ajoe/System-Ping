@@ -27,6 +27,10 @@ fn export_reports_its_result() {
     );
     // The path is part of the message now — on a slow network drive, an export that is still
     // writing cannot be told apart from a stuck window after one second.
+    //
+    // One tick first: an action's sentence reaches the bar at the end of a tick (see `App::say`), so reading the line straight
+    // after the click would only prove the bar had not caught up yet.
+    app.tick(app.engine.elapsed_secs());
     let lang = app.lang();
     let prefix = i18n::fill(lang.msg_writing_csv_path_fmt(), &[("path", String::new())]);
     assert!(
@@ -83,13 +87,16 @@ fn autostart_is_read_from_the_registry() {
     }
     let found = answer.expect("the result of the registry query never arrives");
 
-    // On this machine there is no SystemPing entry (checked in HKCU\...\Run), so the answer has to
-    // be "not present" — and tick() has already pulled it into options.autostart.
-    assert!(
-        !found,
-        "there is no Run entry, so the app has to report that too"
+    // What the Run key holds is a fact about this machine, not about the app: an entry may well be there because someone turned
+    // autostart on once. So the test asks the same question the app asked and compares the two answers — that is what "the app
+    // reads the registry instead of trusting its option" means, and it stays true whichever way the key happens to stand.
+    let really_there = system_ping::platform::autostart::exists();
+    assert_eq!(
+        found, really_there,
+        "the app reported {found}, the Run key says {really_there}"
     );
-    assert!(!app.options.autostart);
+    // And tick() has already pulled that answer into the option the settings screen shows.
+    assert_eq!(app.options.autostart, really_there);
 }
 
 /// The "concurrent probes" setting now reaches the engine without a restart.
@@ -112,4 +119,65 @@ fn concurrency_change_reaches_the_engine() {
     // nothing is running.
     app.options.concurrency = 3;
     app.sync_engine();
+}
+
+/// A sentence the user caused has to survive the things that report by themselves. The case that started this: a protocol file
+/// whose path had gone bad wrote its warning into the status bar on every tick for the next half minute, so "A is now position 2"
+/// was there for one frame and gone — the list looked like it had never answered the drag at all.
+#[test]
+fn an_action_outlives_an_automatic_warning() {
+    let dir = std::env::temp_dir().join("sp-status-order");
+    let _ = std::fs::create_dir_all(&dir);
+    std::env::set_var("SYSTEM_PING_STATE_DIR", &dir);
+
+    let mut app = system_ping::app::App::with_theme_override(
+        system_ping::app::AppOptions::default(),
+        Vec::new(),
+        None,
+    );
+    // The warning needs a protocol file that is open and then reports a failure — which is what happens when the path goes bad
+    // between one probe and the next. Both fields are public for exactly this reason.
+    app.set_protocol(true, system_ping::exporter::ProtocolFormat::Csv);
+    assert!(app.protocol.is_some(), "the protocol file is on");
+    if let Some(p) = &mut app.protocol {
+        p.failed = Some("disk gone".to_string());
+    }
+
+    // The action: the first row moved to the end. Then one tick, in which the warning gets its say first.
+    let a = app.targets[0].id;
+    let n = app.targets.len();
+    app.move_target(a, n);
+    app.tick(app.engine.elapsed_secs());
+
+    let lang = app.lang();
+    assert!(
+        !app.status_msg.contains(
+            lang.msg_protocol_unwritable_fmt()
+                .split('{')
+                .next()
+                .unwrap()
+                .trim_end()
+        ),
+        "the automatic warning pushed the move out of the status bar: {:?}",
+        app.status_msg
+    );
+    assert!(
+        app.status_msg.contains("A") || app.status_msg.contains(&app.targets[n - 1].label),
+        "the status bar does not report the move, but says: {:?}",
+        app.status_msg
+    );
+
+    // And it stays: the warning is not allowed to win a second tick either, because a note is only ever replaced by a newer one.
+    app.tick(app.engine.elapsed_secs());
+    assert!(
+        !app.status_msg.contains(
+            lang.msg_protocol_unwritable_fmt()
+                .split('{')
+                .next()
+                .unwrap()
+                .trim_end()
+        ),
+        "the warning came back on the next tick: {:?}",
+        app.status_msg
+    );
 }

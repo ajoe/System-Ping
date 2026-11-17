@@ -506,9 +506,10 @@ pub struct App {
     pub filter: String,
 
     /// The target being edited in the inline editor, if any. Set by clicking a row in the left
-    /// panel; cleared when the user commits or cancels. `edit_idx` is the index into `targets`,
-    /// which is safe because the list cannot change while the editor is open — `add_target` and
-    /// `remove_selected` refuse to touch the list while something is being edited.
+    /// panel; cleared when the user commits or cancels. `edit_idx` is the index into `targets`, which
+    /// is kept in step with the entry it names: `add_target` and `remove_selected` refuse to touch the
+    /// list while something is being edited, and a drag that shuffles the list moves it along — see
+    /// [`App::move_target`] and [`App::edit_id`].
     pub edit_idx: Option<usize>,
     pub edit_host: String,
     pub edit_label: String,
@@ -585,6 +586,15 @@ pub struct App {
     pub last_save_secs: f64,
 
     pub status_msg: String,
+    /// What the last action said, kept apart from what reported by itself. Two lines share one status bar, and they compete for
+    /// it every frame; this is what settles that. Automatic lines (a protocol file that went bad, a registry answer) write into
+    /// [`Self::status_auto`] and go away on their own — the protocol warning returns for its whole 30 s of retrying. Actions
+    /// write here instead, through [`Self::say`], and stay until something newer replaces them. The bar shows this whenever it is
+    /// not empty, which is why a click wins: see the end of [`Self::tick`].
+    status_note: Option<String>,
+    /// What reported by itself most recently. Kept so one tick's warning cannot be handed to the bar as if it were the last word:
+    /// only this line may come back on the next frame, never a sentence the user caused.
+    status_auto: Option<String>,
     /// Scratch buffer for the per-frame p95 scan in [`ui::chart`], so the chart doesn't
     /// allocate a fresh vector every frame.
     pub chart_p95: Vec<f32>,
@@ -599,14 +609,29 @@ pub struct App {
     pub all_rtt_scratch: Vec<f32>,
     /// Last theme the widgets were drawn for, so a switch re-tints everything.
     pub theme_mode: crate::theme::Mode,
-    /// The click area of every row in the target list, as reported by [`ui::left_body`] during
-    /// the last pass. Only consumer is the click test, which needs it to aim a synthetic mouse
-    /// at a real row instead of guessing coordinates.
-    pub row_rects: Vec<egui::Rect>,
-    /// Height of every row in the target list from the last pass. While a row is being edited its
-    /// frame is replaced by a much taller form; remembering the old height keeps that row's click
+    /// The click area of every row in the target list, as reported by [`ui::left_body`] during the last pass: one entry per row
+    /// *of [`App::targets`]*, counted after the live move of that pass. A row the panel did not draw — an open editor's form, or
+    /// one below a scrollbar's edge — is `None` rather than left out, because every consumer counts rows by position here and a
+    /// hole silently shifts all the places below it up by one.
+    ///
+    /// Counted in the list rather than in the order the rows were drawn: a pass publishes its layout only once its live move has
+    /// been applied (see `move_now` in [`ui::left_body`]), so from then on the two are the same order again and `row_rects[row]`
+    /// means "the rect of `targets[row]`" — which is the only contract a pointer position can be read against without also naming
+    /// the layout it was read in. See [`App::row_of`].
+    pub row_rects: Vec<Option<egui::Rect>>,
+    /// Height of every row in the target list from the last pass, counted in the same rows as [`App::row_rects`]. While a
+    /// row is being edited its frame is replaced by a much taller form; remembering the old height keeps that row's click
     /// area where it was, so the rows below it do not move out from under the mouse.
     pub row_heights: Vec<f32>,
+    /// Which entry each row of [`App::row_rects`] is, in the same order — normally just the ids of [`App::targets`]. The rects
+    /// alone say where a row was; this says what it was, which is how anything that knows an entry by id asks the layout about
+    /// it (see [`App::row_of`]). It is stored rather than read from `targets` because a pass can publish its layout while the
+    /// list behind it has rows the panel never drew.
+    pub row_ids: Vec<usize>,
+    /// The row currently being dragged to another place in the list, as its id — not as an index,
+    /// because the point of a drag is that indices change while it is happening. `ui::left_body`
+    /// sets and clears it; [`App::drop_moved_target`] ends the drag on release.
+    pub drag_row: Option<usize>,
     /// Where the window was during the last drawn pass, so a save at any moment — including the
     /// one on exit — can write it. `None` before the first frame and for a hidden window.
     pub window_geom: Option<store::WindowGeom>,
@@ -912,12 +937,16 @@ impl App {
             autostart_state: Arc::new(AtomicUsize::new(usize::MAX)),
             last_save_secs: 0.0,
             status_msg: Lang::default().msg_ready().to_string(),
+            status_note: None,
+            status_auto: None,
             chart_p95: Vec::new(),
             stats_scratch: Vec::new(),
             cut_scratch: Vec::new(),
             all_rtt_scratch: Vec::new(),
             row_rects: Vec::new(),
             row_heights: Vec::new(),
+            row_ids: Vec::new(),
+            drag_row: None,
             window_geom: None,
             // Placeholder until the top bar has been drawn once, which happens before any key can
             // reach the fields.
@@ -1016,6 +1045,11 @@ impl App {
         // Same for the autostart lookup that started at launch.
         self.poll_autostart();
 
+        // The status bar is refreshed before anything below can stop this tick: every line written above, and every sentence an
+        // action asked for, belongs to the window whether or not measuring is running. A window that is paused still has to show
+        // what a click reported — otherwise the bar keeps sitting on its previous text and the list looks like it never answered.
+        self.refresh_status();
+
         if !self.running {
             return;
         }
@@ -1052,10 +1086,17 @@ impl App {
         // A protocol file that went bad says so once (the flag clears on a successful reopen).
         if let Some(p) = &self.protocol {
             if let Some(err) = p.failed.clone() {
-                self.status_msg =
-                    i18n::fill(self.lang().msg_protocol_unwritable_fmt(), &[("err", err)]);
+                self.status_auto = Some(i18n::fill(
+                    self.lang().msg_protocol_unwritable_fmt(),
+                    &[("err", err)],
+                ));
             }
         }
+        // One line, two sources: what the user did last wins over what reported by itself. The automatic line is not thrown away
+        // when it loses — a protocol file that cannot be written retries every 30 s and would otherwise erase an action for half
+        // a minute (see `status_note`). It reappears as soon as nothing newer is in the way, which is right: the warning is still
+        // true, only the click was more recent.
+        self.refresh_status();
 
         // Periodic housekeeping + autosave.
         if now_secs - self.last_tick_secs > 1.0 {
@@ -1333,7 +1374,37 @@ impl App {
         }
     }
 
+    /// Puts the two waiting lines into the status bar: what the user did last if there is such a thing, otherwise whatever
+    /// reported by itself. Kept apart from [`Self::tick`] because a paused app ticks too — its actions have to reach the bar just
+    /// the same (see the call before `tick`'s early return).
+    fn refresh_status(&mut self) {
+        self.status_msg = self
+            .status_note
+            .clone()
+            .or_else(|| self.status_auto.clone())
+            .unwrap_or_default();
+    }
+
+    /// Ask for a sentence in the status bar and keep it there: it is written at the end of the next [`Self::tick`] and stays until
+    /// something newer replaces it. Use this for anything the user did — a line that reports by itself (see `status_auto`) only
+    /// gets the bar while nothing the user caused is waiting for it.
+    pub fn say(&mut self, msg: impl Into<String>) {
+        self.status_note = Some(msg.into());
+    }
+
+    /// The same rule for a sentence taken from the language table — the usual case for a message that
+    /// comes from the UI text (`self.lang().msg_…()`).
+    pub fn say_lang(&mut self, msg: &'static str) {
+        self.say(msg);
+    }
+
     pub fn start(&mut self) {
+        self.start_quiet(false);
+    }
+
+    /// `start`, with the option to keep the status bar out of it. A programmatic start (a test, a headless run) is not
+    /// something the user did and has nothing to report about it; the button in the top bar keeps saying what it always said.
+    pub fn start_quiet(&mut self, quiet: bool) {
         self.running = true;
         // Stagger the first probes so a big list doesn't fire all at once.
         let now = self.engine.elapsed_secs();
@@ -1343,24 +1414,33 @@ impl App {
                     .insert(t.id, now + (i as f64 * 0.12).min(1.5));
             }
         }
-        self.status_msg = self.lang().msg_measuring().to_string();
+        if !quiet {
+            self.say(self.lang().msg_measuring().to_string());
+        }
     }
 
     pub fn stop(&mut self) {
+        self.stop_quiet(false);
+    }
+
+    /// `stop`, with the option to keep the status bar out of it — same reason as [`Self::start_quiet`].
+    pub fn stop_quiet(&mut self, quiet: bool) {
         self.running = false;
         self.engine.stop_all();
-        self.status_msg = self.lang().msg_stopped_edit().to_string();
+        if !quiet {
+            self.say(self.lang().msg_stopped_edit().to_string());
+        }
     }
 
     pub fn add_target(&mut self) {
         // The editor keeps its target by index, so the list must not grow underneath it.
         if self.edit_idx.is_some() {
-            self.status_msg = self.lang().msg_finish_edit_first().to_string();
+            self.say(self.lang().msg_finish_edit_first().to_string());
             return;
         }
         let host = self.new_host.trim().to_string();
         if host.is_empty() {
-            self.status_msg = self.lang().msg_need_address().to_string();
+            self.say(self.lang().msg_need_address().to_string());
             return;
         }
         let label = if self.new_label.trim().is_empty() {
@@ -1382,7 +1462,33 @@ impl App {
         self.new_host.clear();
         self.new_label.clear();
         self.selected = self.targets.len() - 1;
-        self.status_msg = i18n::fill(self.lang().msg_added_full_fmt(), &[("host", host)]);
+        self.say(i18n::fill(
+            self.lang().msg_added_full_fmt(),
+            &[("host", host)],
+        ));
+    }
+
+    /// Replace the whole list with a known set of named addresses. Tests and headless runs use this to be independent of what the
+    /// machine's network happens to offer: an app built from nothing starts with the built-in three (see [`default_targets`]), and
+    /// a test that asks for A/B/C has to get exactly those three rows, not five. The selection starts at the top.
+    ///
+    /// The list is written directly rather than grown one `add_target` at a time: that path refuses to touch a list while an
+    /// editor is open, and this function's whole point is "this is the list now" — a half-applied list would be worse than a
+    /// surprise. Ids count from 0 like the loader's do, so nothing downstream can tell the two apart.
+    pub fn set_test_targets(&mut self, targets: &[(&str, &str)]) {
+        for t in &self.targets {
+            self.engine.stop_target(t.id);
+        }
+        self.next_probe_at.clear();
+        self.targets.clear();
+        for (i, (label, host)) in targets.iter().enumerate() {
+            let mut t = Target::new(i, (*label).to_string(), (*host).to_string(), classify(host));
+            // Same rule as `add_target`: a new target only knows the constructor's floor, and the window it has to hold is a
+            // setting this app does have.
+            t.series.set_cap(effective_max_samples(&self.options));
+            self.targets.push(t);
+        }
+        self.selected = 0;
     }
 
     /// Add a target with an explicit label (used by the quick-pick buttons).
@@ -1402,30 +1508,121 @@ impl App {
         }
     }
 
-    /// The click areas of the rows, in target order, as egui saw them in the last pass. The click
-    /// test uses them to aim a synthetic pointer at a row; `ui::left_body()` fills them.
-    pub fn row_rects(&self) -> &[egui::Rect] {
+    /// The click areas of the rows, as the panel drew them on the last pass: one entry per row *of [`App::targets`]*, in the
+    /// order of that list after the live move of that pass, holding `None` where an open editor drew its form instead of a row.
+    /// The click test uses them to aim a synthetic pointer at a row; `ui::left_body()` fills them. See the field for why the holes
+    /// are kept rather than dropped, and [`App::row_of`] for how to ask this by entry rather than by place.
+    pub fn row_rects(&self) -> &[Option<egui::Rect>] {
         &self.row_rects
     }
 
+    /// The same click areas as a plain list of rects, with the holes left out: what `ui::clicked_in_row` aims a synthetic
+    /// pointer at. A point cannot land on a row that was not drawn, so skipping those is exactly right — but note that
+    /// this is *not* the numbering [`App::row_rects`] uses, and a caller that needs to say which row it means has to count
+    /// the same way the answer came back (see [`App::row_target_of_undrawn_row`]).
+    pub fn target_row_rects(&self) -> Vec<egui::Rect> {
+        self.row_rects.iter().flatten().copied().collect()
+    }
+
+    /// Turns a row counted by [`App::target_row_rects`] — which skips undrawn rows — back into the entry it belongs to.
+    /// `None` for a row that does not exist or was never drawn.
+    pub fn row_target_of_undrawn_row(&self, drawn_row: usize) -> Option<usize> {
+        self.row_ids
+            .iter()
+            .zip(self.row_rects())
+            .filter(|(_, rect)| rect.is_some())
+            .nth(drawn_row)
+            .map(|(id, _)| *id)
+    }
+
+    /// The entries whose rows the panel laid out its last pass, one for each row of [`App::row_rects`] — so the two describe one
+    /// and the same layout, and a row that drew no strip still holds its place. It is the order of [`App::targets`], because a
+    /// pass publishes its layout only after its live move (see `ui::left_body`), which is what lets anything count rows of the list
+    /// and read the matching rect.
+    pub fn row_ids(&self) -> &[usize] {
+        &self.row_ids
+    }
+
+    /// Which row of the last layout the entry with this id stood in, or `None` when that pass drew no row for it. This is how
+    /// anything that knows an entry — rather than a place on screen — asks a question of [`App::row_rects`].
+    pub fn row_of(&self, id: usize) -> Option<usize> {
+        self.row_ids.iter().position(|drawn| *drawn == id)
+    }
+
+    /// Where the row of the target with this id stood on the last pass, or `None` when the panel did not draw it.
+    /// A test uses this to aim a pointer at a real row by name rather than by counting rows.
+    pub fn row_rect_of(&self, id: usize) -> Option<egui::Rect> {
+        self.row_of(id)
+            .and_then(|row| self.row_rects.get(row).copied().flatten())
+    }
+
+    /// Which entry the inline editor is showing, by id — or `None` when no form is open. Asking this instead of
+    /// `edit_idx` is what lets a caller care about *the entry being edited* rather than about a row that may already
+    /// have moved: a drag shuffles the list while its rows are drawn, and an index then names whoever happens to stand
+    /// there. The index is kept in step with the entry (see [`App::move_target`]), so both answers agree — but only this
+    /// one says so by construction.
+    pub fn edit_id(&self) -> Option<usize> {
+        self.edit_idx
+            .and_then(|idx| self.targets.get(idx))
+            .map(|t| t.id)
+    }
+
+    /// Which row of the list a target with this id currently sits in, or `None` when no such target
+    /// exists. A drag keeps its entry by id precisely because its row changes while it is carried.
+    pub fn target_row_of(&self, id: usize) -> Option<usize> {
+        self.targets.iter().position(|t| t.id == id)
+    }
+
+    /// Puts a measurement into one target's history by id, as the real engine does through
+    /// [`App::apply_result`]. Tests use it to give a list something to draw: rows are laid out at the
+    /// same height either way, but a row that has never answered shows "waiting" instead of a latency,
+    /// and text that long can be what makes egui need a scrollbar.
+    pub fn record_sample_for(&mut self, id: usize, rtt_ms: f32) {
+        if let Some(t) = self.targets.iter_mut().find(|t| t.id == id) {
+            // The engine clock only counts while the app runs, so a stopped test app would stamp every
+            // sample with the same time and the rows would read as one instant. A real measurement gets
+            // its time from the engine; here the app clock is simply where that time comes from.
+            let now = self.engine.elapsed_secs().max(0.0);
+            t.series.record(now, 0, rtt_ms, None);
+            t.last_probe_secs = now;
+            t.last_rtt = rtt_ms;
+        }
+    }
+
     /// Open the inline editor for a target. Called when a row in the left panel is clicked, so a
-    /// single click is enough to reach the settings.
+    /// single click is enough to reach the settings. A row that has just been dragged somewhere else
+    /// must not open its editor on the way — see [`App::drop_moved_target`].
     ///
     /// An editor that was already open is saved first, so switching rows never loses an edit. The
     /// commit closes the editor, which is why it has to happen before the new row is loaded here.
     pub fn begin_edit(&mut self, idx: usize) {
-        if self.targets.get(idx).is_some() {
+        if let Some(t) = self.targets.get(idx) {
+            let id = t.id;
+            self.begin_edit_by_id(id);
+        }
+    }
+
+    /// Opens the inline editor for the entry with this id, wherever it happens to sit.
+    ///
+    /// The row loop collects "open this one" as an id and applies it once the list is no longer borrowed — by then a
+    /// live move may have shuffled everything, so the index that row was drawn at means nothing. This is the lookup that
+    /// turns the id back into today's row.
+    pub fn begin_edit_by_id(&mut self, id: usize) {
+        let Some(idx) = self.targets.iter().position(|t| t.id == id) else {
+            return;
+        };
+        // Any form that was open is committed first, so switching rows never loses an edit.
+        if self.edit_idx.is_some() {
             self.close_edit();
         }
-        if let Some(t) = self.targets.get(idx) {
-            self.selected = idx;
-            self.edit_idx = Some(idx);
-            self.edit_host = t.host.clone();
-            self.edit_label = t.label.clone();
-            self.edit_kind = t.kind;
-            self.edit_enabled = t.enabled;
-            self.edit_color_idx = t.color_idx;
-        }
+        let t = &self.targets[idx];
+        self.selected = idx;
+        self.edit_idx = Some(idx);
+        self.edit_host = t.host.clone();
+        self.edit_label = t.label.clone();
+        self.edit_kind = t.kind;
+        self.edit_enabled = t.enabled;
+        self.edit_color_idx = t.color_idx;
     }
 
     /// Close the editor and commit what is in it. Used when the user clicks a second target, so
@@ -1449,7 +1646,7 @@ impl App {
 
         let new_host = self.edit_host.trim().to_string();
         if new_host.is_empty() {
-            self.status_msg = self.lang().msg_empty_host().to_string();
+            self.say(self.lang().msg_empty_host().to_string());
             self.edit_idx = None;
             return;
         }
@@ -1499,7 +1696,9 @@ impl App {
             }
         }
 
-        self.status_msg = if host_changed && label_changed {
+        // Built while the target is still borrowed (its label and enabled switch are part of the
+        // sentence), then handed over once that borrow is over — `say` needs `&mut self`.
+        let note = if host_changed && label_changed {
             i18n::fill(
                 lang.msg_host_to_label_fmt(),
                 &[("old", old_host), ("new", new_host)],
@@ -1521,6 +1720,7 @@ impl App {
         } else {
             lang.msg_no_change().to_string()
         };
+        self.say(note);
 
         self.edit_idx = None;
         self.save_now();
@@ -1532,24 +1732,46 @@ impl App {
     }
 
     pub fn remove_selected(&mut self) {
-        if self.targets.is_empty() {
-            return;
+        // By id, not by index: the row that is selected now is not necessarily the one this call was asked for (see
+        // `remove_target_by_id`).
+        if let Some(t) = self.targets.get(self.selected) {
+            let id = t.id;
+            self.remove_target_by_id(id);
         }
+    }
+
+    /// Takes the entry with this id out of the list, stopping its measurements.
+    ///
+    /// Asked by id rather than through [`App::remove_selected`] because a caller that decided to delete while the list
+    /// was being drawn cannot know where the entry stands by the time it acts: only an id survives whatever the list did
+    /// in between. The selection moves to the neighbour the removed row leaves behind, which is what "delete this one and
+    /// carry on next door" means.
+    pub fn remove_target_by_id(&mut self, id: usize) {
+        let Some(i) = self.targets.iter().position(|t| t.id == id) else {
+            return;
+        };
         // Removing a row would shift the index the editor points at.
         if self.edit_idx.is_some() {
-            self.status_msg = self.lang().msg_finish_edit_first().to_string();
+            self.say(self.lang().msg_finish_edit_first().to_string());
             return;
         }
-        let i = self.selected.min(self.targets.len() - 1);
-        let t = &self.targets[i];
-        self.engine.stop_target(t.id);
-        self.next_probe_at.remove(&t.id);
-        let label = t.label.clone();
+        self.engine.stop_target(id);
+        self.next_probe_at.remove(&id);
+        let label = self.targets[i].label.clone();
         self.targets.remove(i);
-        if self.selected >= self.targets.len() {
-            self.selected = self.targets.len().saturating_sub(1);
+        // The row that was removed is gone, so the selection follows it down to whoever stands there now.
+        self.selected = i.min(self.targets.len().saturating_sub(1));
+        self.say(i18n::fill(
+            self.lang().msg_removed_full_fmt(),
+            &[("label", label)],
+        ));
+    }
+
+    /// Moves the selection onto the entry with this id, leaving it where it was when there is no such entry.
+    pub fn selected_by_id(&mut self, id: usize) {
+        if let Some(pos) = self.targets.iter().position(|t| t.id == id) {
+            self.selected = pos;
         }
-        self.status_msg = i18n::fill(self.lang().msg_removed_full_fmt(), &[("label", label)]);
     }
 
     pub fn reset_stats(&mut self) {
@@ -1563,7 +1785,7 @@ impl App {
         self.log.clear();
         self.log_total = 0;
         self.alert_count = 0;
-        self.status_msg = self.lang().msg_measurements_cleared().to_string();
+        self.say(self.lang().msg_measurements_cleared().to_string());
     }
 
     /// Start an export to `path`. Returns whether a file was actually handed to the worker: with no
@@ -1571,12 +1793,12 @@ impl App {
     /// goes into the status bar instead.
     pub fn export_csv(&mut self, path: PathBuf) -> bool {
         if self.pending_export.load(Ordering::Acquire) {
-            self.status_msg = self.lang().msg_export_running().to_string();
+            self.say(self.lang().msg_export_running().to_string());
             return false;
         }
         let rows = collect_export_rows(&self.targets);
         if rows.is_empty() {
-            self.status_msg = self.lang().msg_no_samples().to_string();
+            self.say(self.lang().msg_no_samples().to_string());
             return false;
         }
         // The name belongs in the status bar, and stays there until the writer thread's message
@@ -1610,10 +1832,10 @@ impl App {
         // after one second — and the file one is waiting for would still be an unnamed one. The
         // writer thread replaces the line with its result.
         let lang = self.lang();
-        self.status_msg = i18n::fill(
+        self.say(i18n::fill(
             lang.msg_writing_csv_path_fmt(),
             &[("path", path.display().to_string())],
-        );
+        ));
         std::thread::spawn(move || {
             let msg = match exporter::write_csv(&path, &rows) {
                 Ok(n) => i18n::fill(lang.msg_csv_written_fmt(), &[("n", n.to_string())]),
@@ -1636,7 +1858,7 @@ impl App {
         }
         let rows = collect_export_rows(&self.targets);
         if rows.is_empty() {
-            self.status_msg = self.lang().msg_no_samples().to_string();
+            self.say(self.lang().msg_no_samples().to_string());
             return;
         }
         self.pending_dialog.store(true, Ordering::Release);
@@ -1663,7 +1885,7 @@ impl App {
         // reads it on the next frame, and a channel that was never handed out simply stays empty.
         self.export_dialog = std::rc::Rc::new(rx);
         let _ = tx;
-        self.status_msg = self.lang().msg_dialog_opened().to_string();
+        self.say(self.lang().msg_dialog_opened().to_string());
     }
 
     /// Take the dialog's answer, if there is one. A chosen path starts the export right away; a
@@ -1679,13 +1901,15 @@ impl App {
                     self.write_csv(path, rows);
                 }
             }
-            None => self.status_msg = self.lang().msg_export_cancelled().to_string(),
+            None => self.say(self.lang().msg_export_cancelled().to_string()),
         }
     }
 
     pub fn take_export_result(&mut self) {
         if let Some(msg) = self.export_result.take() {
-            self.status_msg = msg;
+            // This is the answer to the click that started the export, so it goes in as an action: it outranks an automatic line
+            // and stays until something newer replaces it, instead of being overwritten by the next warning.
+            self.status_note = Some(msg);
         }
     }
 
@@ -1703,11 +1927,11 @@ impl App {
         let wanted = self.options.autostart;
         if wanted != found {
             self.options.autostart = found;
-            self.status_msg = if found {
+            self.status_auto = Some(if found {
                 self.lang().msg_autostart_on_registry().to_string()
             } else {
                 self.lang().msg_autostart_off_registry().to_string()
-            };
+            });
         }
     }
 
@@ -1797,10 +2021,10 @@ impl App {
     /// by [`crate::platform::folder`].
     pub fn open_state_folder(&mut self) {
         let dir = store::state_dir();
-        self.status_msg = i18n::fill(
+        self.say(i18n::fill(
             self.lang().msg_folder_opened_fmt(),
             &[("dir", dir.display().to_string())],
-        );
+        ));
         std::thread::spawn(move || {
             let _ = crate::platform::folder::open(&dir);
         });
@@ -2038,6 +2262,102 @@ impl App {
     /// The id of the currently selected target (if it still exists).
     fn selected_id(&self) -> usize {
         self.targets.get(self.selected).map_or(usize::MAX, |t| t.id)
+    }
+
+    /// Moves a row to another place in the list — the live follow of a drag started by holding a row in the left
+    /// panel and pulling it up or down, and the final move at its end. `id` is the dragged target and `to` the index
+    /// it should end up at, both as they were when the pointer was last read; passing the target's own index is
+    /// allowed and simply changes nothing.
+    ///
+    /// Ids rather than indices because a drag is exactly the situation in which the numbers under a row stop being
+    /// valid: an open editor can occupy a row, and while the list is being re-drawn after every move the old index
+    /// already points somewhere else. An id always finds its target.
+    ///
+    /// The selection follows the moved target (see [`App::selected_id`]).
+    ///
+    /// Writing the file is deliberately *not* part of this: a drag that follows the pointer calls it on almost every
+    /// pass, and one write per shuffle would be a disk access per frame. A finished gesture writes through
+    /// [`Self::drop_moved_target`] instead, and so does every other way of reordering.
+    pub fn move_target(&mut self, id: usize, to: usize) {
+        let Some(from) = self.targets.iter().position(|t| t.id == id) else {
+            return;
+        };
+        // The editor keeps its target by index and the list is about to change. While a form is
+        // open the order therefore stays as it is — same rule as `add_target` and
+        // `remove_selected` follow, and the drag handle simply does not appear on an open row.
+        if self.edit_idx.is_some() {
+            self.say(self.lang().msg_finish_edit_first().to_string());
+            return;
+        }
+        // `to` counts the list with the carried entry still in it, which is what every caller measures by (see `ui::slot_at`).
+        // That has two consequences this function has to honour.
+        //
+        // A slot one past the entry's own place is "leave it where it is": the pointer was over the row below, and that row has
+        // moved up into the hole. Without this rule, a hand that wobbles over the next row's centre mid-drag visibly swaps two
+        // entries.
+        //
+        // And the clamp belongs here, before the entry is taken out — not after. A slot one past the end (a drop below the bottom
+        // row, or an index that ran away past it) means "at the very end": index `len` while the entry is in the list, `len - 1`
+        // once it is gone. Clamping after the removal makes those two the same number on the last row, so such a drop lands on the
+        // entry's own place and silently does nothing although the pointer clearly said otherwise.
+        let len = self.targets.len();
+        let to = to.min(len);
+        if to == from || to == from + 1 {
+            // Dropped where it already was: nothing happened, so nothing is said about it either. A drag that shuffles the list
+            // passes through this case on its way back, and a status line claiming "nothing moved" would be wrong half the time.
+            return;
+        }
+        let t = self.targets.remove(from);
+        // Above, `to` counted the list with the entry still in it. Here the entry is out, so a slot behind the last row has to
+        // come down by one — that is all this is, not a second clamp: `from < to <= len` always leaves an index inside the new
+        // length, and `insert` at that end means "behind everything", which is what such a drop asked for.
+        let to = if to > from { to - 1 } else { to };
+        self.targets.insert(to, t);
+        // Said out loud because the row that used to be there is not where it was: a list of ten rows is long enough that a moved
+        // entry can leave the visible part of the panel.
+        let label = self.targets[to].label.clone();
+        self.say(i18n::fill(
+            self.lang().msg_moved_fmt(),
+            &[("label", label), ("n", (to + 1).to_string())],
+        ));
+        if let Some(pos) = self.targets.iter().position(|t| t.id == id) {
+            self.selected = pos;
+        }
+    }
+
+    /// Ends a row drag by moving the target to slot `to` and letting go of it. This is the one place a
+    /// reordering drag writes the state file: while the entry is in flight the list may be shuffled every
+    /// pass, and only the final place is what the user wants to meet after a restart.
+    ///
+    /// The release that ended the drag is still also a click on a row as far as egui is concerned, but
+    /// [`crate::ui::left_body`] already knows an entry was in flight in this pass and opens no editor for
+    /// it (see `tests/frame_click.rs` for why a row's click is read from the rects of the previous pass).
+    pub fn drop_moved_target(&mut self, id: usize, to: usize) {
+        // The move happens before the drag ends, so the caller can still describe the list as it was
+        // while the entry was carried — the slot `to` counts the carried entry in.
+        self.move_target(id, to);
+        self.drag_row = None;
+        // Written whether or not the last pass moved anything: the order may well have changed on an
+        // earlier pass of the same drag, and this is the only moment that knows the gesture is over.
+        self.save_now();
+    }
+
+    /// The place a row being dragged should move to when the pointer rests on `target_row`, the
+    /// index of the row it is over, at height `pointer_y` inside that row's `rect`. A row is
+    /// inserted *before* the one pointed at from above and *after* it from below, so hovering the
+    /// middle of a row does not make the entry jump: only a clear push past its centre decides the
+    /// direction.
+    ///
+    /// The index in the list *as it is now*, counting the dragged entry in: dropping behind the row
+    /// at index 3 asks for index 4. [`App::move_target`] counts the same way — it takes the entry out
+    /// of its old slot and inserts it at the requested place — so a row pulled downwards lands where
+    /// the pointer was. See `ui::slot_at`, which turns the pointer's position into this number.
+    pub fn drop_index_for(target_row: usize, pointer_y: f32, rect: egui::Rect) -> usize {
+        if pointer_y < rect.center().y {
+            target_row
+        } else {
+            target_row + 1
+        }
     }
 
     /// How long a click on the "clear measurements" stays armed before the warning lapses. Long enough

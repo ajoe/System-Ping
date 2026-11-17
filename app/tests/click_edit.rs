@@ -61,12 +61,16 @@ fn release(at: Pos2) -> Event {
     }
 }
 
-/// Where a row is right now, as the last pass drew it.
+/// Where a row is right now, asked by the id of the entry it shows rather than by counting rows.
+///
+/// The panel reports each rect together with the entry it was drawn for (see [`App::row_rect_of`]), and a test that
+/// says "row 1" means "the row showing the second entry", so that is how it asks. Pairing the rects with the list by
+/// position instead would be wrong here as soon as something has reordered the list between the pass that drew them
+/// and the one that reads them — which is exactly what a drag does.
 fn row_rect(app: &App, row: usize) -> Rect {
-    app.row_rects()
-        .get(row)
-        .copied()
-        .unwrap_or_else(|| panic!("row {row} was never reported as a rect"))
+    let id = app.targets[row].id;
+    app.row_rect_of(id)
+        .unwrap_or_else(|| panic!("row for target {id} was never reported as a rect"))
 }
 
 /// A full click at `spot`: move the pointer there, press, release. The pointer rests inside the
@@ -169,11 +173,13 @@ fn a_click_on_the_open_row_leaves_the_editor_alone() {
     let bottom = app
         .row_rects
         .iter()
+        .flatten()
         .map(|r| r.bottom())
         .fold(f32::NEG_INFINITY, f32::max);
     let beside = Pos2::new(
         app.row_rects
             .iter()
+            .flatten()
             .map(|r| r.right())
             .fold(0.0_f32, f32::max)
             + 40.0,

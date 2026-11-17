@@ -382,6 +382,100 @@ impl eframe::App for SelfTest {
     }
 }
 
+/* ------------------------------------------------------------------ drag self test */
+
+/// Watches a real person drag a row and prints what egui makes of every pass.
+///
+/// The headless tests in `tests/drag_order.rs` drive a synthetic pointer without a window, and they are the ones that
+/// guard the behaviour. This is for what they cannot show: whether the gesture works against input that comes through the
+/// OS and the windowing library. Started with `DRAG_WATCH=1`; move the mouse over the list and drag a row, and every pass
+/// prints where egui thinks the pointer is, which row strip it lands on, and what the list order is. The window closes
+/// itself once nothing has been touched for a few seconds.
+///
+/// Deliberately passive. A scripted cursor was tried first and does not work: `SetCursorPos` moves the pointer, but
+/// Windows only reports a move that it finds *between* two polls, so a programmatic warp inside one frame never reaches
+/// winit at all — egui sat at `hover=None` for every pass while the cursor was demonstrably in the right place. Only a
+/// real mouse produces events, so this watches one instead of faking it.
+pub struct DragSelfTest {
+    app: App,
+    /// Passes with no pointer movement since the last one; the run ends once enough have piled up.
+    idle: usize,
+}
+
+impl DragSelfTest {
+    pub fn new(mut app: App, cc: &CreationContext<'_>) -> Self {
+        let want = crate::theme::resolve(&cc.egui_ctx, &app.options.theme);
+        app.theme_mode = want;
+        crate::theme::apply(&cc.egui_ctx, want);
+        app.start();
+        // The watcher drives its own frames and must not race the sampler.
+        app.running = false;
+        eprintln!("DRAGWATCH: drag a row in the list; the window closes when you stop.");
+        Self { app, idle: 0 }
+    }
+}
+
+impl eframe::App for DragSelfTest {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let order = self
+            .app
+            .targets
+            .iter()
+            .map(|t| t.label.clone())
+            .collect::<Vec<_>>();
+        // Where egui believes the pointer is, and what our own layout says about that point. Both are printed because a
+        // disagreement between them is precisely the bug being hunted: egui's hit test versus `App::row_rects`.
+        let seen = ctx.input(|i| {
+            (
+                i.pointer.hover_pos(),
+                i.pointer.any_down(),
+                i.pointer.delta(),
+                i.time,
+            )
+        });
+        let rows = self.app.target_row_rects();
+        match seen.0 {
+            Some(pos) => {
+                let row = rows.iter().position(|r| r.contains(pos));
+                eprintln!(
+                    "DRAGWATCH ptr=[{:.0},{:.0}] delta=[{:.1},{:.1}] down={} row={:?} drag={:?} order={:?}",
+                    pos.x,
+                    pos.y,
+                    seen.2.x,
+                    seen.2.y,
+                    seen.1,
+                    row,
+                    self.app.drag_row,
+                    order
+                );
+                // Movement keeps the run alive; a still pointer means the person is done.
+                if seen.2 == egui::Vec2::ZERO && !seen.1 {
+                    self.idle += 1;
+                } else {
+                    self.idle = 0;
+                }
+            }
+            None => {
+                eprintln!("DRAGWATCH no pointer, rows={:?}", rows.len());
+                self.idle += 1;
+            }
+        }
+
+        self.app.frame(ctx);
+
+        if self.idle > 240 {
+            eprintln!("DRAGWATCH final order: {:?}", order);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // Repaint on our own schedule so a drag is sampled continuously rather than only when the OS feels like it.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.app.stop();
+    }
+}
+
 /* ------------------------------------------------------------------ raster */
 
 fn capture(

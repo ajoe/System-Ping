@@ -34,7 +34,7 @@ macOS braucht nur die Command Line Tools (`xcode-select --install`). Unter Windo
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 82 Tests (32 Unit- + 50 Integrationstests, ohne GUI)
+cargo test                   # 92 Tests (32 Unit- + 60 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ```
 
@@ -154,6 +154,17 @@ Farb-Knopf im Editor stellt sie um: eine Farbe wählen oder mit „Auto“ die a
 ein Ziel, das per Hand gewählt ist, gibt seine Farbe für die automatischen frei. Sind mehr Ziele
 als Farben da, werden die Farben wieder verwendet. Die kleine Scheibe vor dem Namen bleibt davon
 unberührt — sie zeigt weiter den Zustand (grün/gelb/orange/rot).
+
+**Reihenfolge selbst bestimmen:** eine Zeile der linken Liste fassen und halten (linksklick,
+Maus gedrückt lassen), dann nach oben oder unten ziehen. Die Liste räumt dabei sofort unter dem
+Zeiger um, die gezogene Zeile ist ausgegraut, und der Mauszeiger zeigt die greifende Hand; ein
+Greifpunkt aus sechs Punkten am linken Rand markiert die Zeile. Loslassen entscheidet den end-
+gültigen Platz — oberhalb der Mitte einer Zeile landet man vor ihr, darunter hinter ihr, und in
+der Lücke zwischen zwei Zeilen direkt an dieser Grenze. Die Reihenfolge ist dieselbe, die im
+Zustandsfile steht, also nach einem Neustart wieder da. Ein Ziel, dessen Editor offen ist, lässt
+sich nicht ziehen: das Formular hat Vorrang, und ein Drop auf ihm wird absichtlich verworfen,
+sonst würde ein Feld des Formulars getroffen. Abgelassene Klicks zählen nicht als Klick auf die
+Zeile — wer zieht, öffnet dabei keinen Editor.
 
 ## Sprache: eine Tabelle, zwei Sprachen
 
@@ -306,6 +317,17 @@ läuft alle 8 s); ein eigener „Speichern“-Knopf wäre ein dritter Weg für e
 automatisch passiert. `Laufzeit` rechnet ab einer Stunde in `H:MM:SS` um. Der Knopf **„CSV“**
 exportiert sofort in den Zustandsordner und öffnet ihn, **„⌂ Daten“** in der Kopfzeile tut nichts
 anderes als das Ordnerfenster zeigen.
+
+In der Leiste teilen sich zwei Arten von Sätzen einen Platz: was ein Klick berichtet („3 → 1“
+nach dem Umziehen, „Ziel gespeichert“, welcher Pfad ein Export schreibt) und was von selbst
+meldet (eine Messung, ein Protokollfile, das nicht mehr schreibbar ist, die Autostart-Auskunft
+aus der Registry). Was der Nutzer zuletzt getan hat, gewinnt — und zwar dauerhaft, nicht nur für
+einen Frame. Die automatische Warnung wird dabei nicht weggeworfen: sie kommt wieder, sobald
+nichts Neueres da ist, denn sie ist ja noch wahr; ein Protokollfile, das alle 30 s neu
+ausprobiert werden darf, durfte eine Aktion nicht eine halbe Minute lang überdecken. Der Grund,
+warum das überhaupt geregelt werden musste: solange nichts gemessen wurde, blieb die Leiste auf
+ihrem alten Text stehen, und ein Klick ohne laufenden Betrieb sah aus wie gar keiner. Geprüft
+wird das in `app/tests/fixes.rs`.
 
 ## Zustand und Dateien
 

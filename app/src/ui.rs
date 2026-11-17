@@ -5,13 +5,17 @@ use crate::history;
 use crate::i18n::{self, Lang};
 use crate::store;
 use crate::theme::{self, Mode};
-use egui::{Color32, CursorIcon, FontId, Label, Rect, RichText, ScrollArea, Stroke, Ui, Vec2};
+use egui::{
+    pos2, Color32, CursorIcon, FontId, Id, Label, Pos2, Rect, RichText, ScrollArea, Stroke, Ui,
+    Vec2,
+};
 use std::path::PathBuf;
 
+/// Draws one frame of the whole window.
 pub fn draw(ctx: &egui::Context, app: &mut App) {
     top(ctx, app);
-    left(ctx, app);
     bottom(ctx, app);
+    left(ctx, app);
     center(ctx, app);
 }
 
@@ -419,10 +423,19 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
 /// reports different rects, so the pointer of the click that opened it would be judged against
 /// geometry that did not exist when the mouse was pressed.
 ///
-/// `rects` are the row click areas from `App::row_rects`, so this only ever answers after a first
-/// layout pass — which is also true of a real click, since egui has to have drawn the rows before
-/// anyone can aim at them. A click on a control outside the list — a button, a combo box — lands in
-/// no row and returns `None`, which keeps those controls working normally.
+/// `rects` are the row click areas from `App::row_rects`, so this only ever answers after a first layout pass —
+/// which is also true of a real click, since egui has to have drawn the rows before anyone can aim at them. A click
+/// on a control outside the list — a button, a combo box — lands in no row and returns `None`, which keeps those
+/// controls working normally.
+///
+/// `rects` are the row click areas from [`App::target_row_rects`] — one per drawn row, without the id each one came
+/// from. The index this answers with counts *drawn* rows, so a caller cannot read it as an index into
+/// [`App::targets`]: an open editor draws no strip and is not counted here, while it does occupy a row of the list.
+/// [`App::row_target_of_undrawn_row`] turns the answer back into the entry it belongs to, which is what the caller acts on.
+///
+/// A press that turned into a drag is not a click: egui says so with `any_click()`, which only reports a release
+/// that stayed inside the click slop. That is what keeps dragging a row to another place from also opening its
+/// editor.
 pub fn clicked_in_row(ctx: &egui::Context, rects: &[Rect]) -> Option<usize> {
     // Only a finished primary press+release counts; a drag of the panel border must not edit.
     let pointer = ctx.input(|i| {
@@ -435,25 +448,308 @@ pub fn clicked_in_row(ctx: &egui::Context, rects: &[Rect]) -> Option<usize> {
     rects.iter().position(|rect| rect.contains(pointer))
 }
 
-/// The panel's contents on their own. Tests call this directly so they can place the panel
-/// somewhere they control and click a row with a synthetic pointer.
 /// Height of a row in the target list, in ui points: two lines of text plus the frame's padding.
 /// The click area of a row is this tall, so it always covers exactly what the row shows — and an
 /// open editor keeps the same strip for its neighbour clicks (see `App::row_heights`).
 const ROW_H: f32 = 39.0;
 
+/// The empty band between two rows, which belongs to neither of them. A drop is aimed at a row, so
+/// only the row's own height may be claimed as its click area — the gap would otherwise answer for
+/// the row above it and make the boundary where an entry lands sit too low. It is exactly the frame's
+/// bottom margin plus the list's item spacing, which is what makes `ROW_H - GAP_Y` the strip height.
+const GAP_Y: f32 = 9.0;
+
+/// Width of the grip drawn at the left edge of a hovered row — the only hint that a row can be
+/// pulled to another place. Narrow enough that the row's own text keeps its room.
+const GRIP_W: f32 = 10.0;
+
+/// The id a row's click strip is registered under, for a given target.
+///
+/// The gesture needs it in both of its halves. A press has to be recognised as a drag later on even if
+/// the entry it grabbed has already been shuffled through the list, and egui can only be asked about a
+/// widget by id — an index would name whatever row happens to sit there now, while an id follows the
+/// entry.
+pub fn strip_id(target_id: usize) -> Id {
+    Id::new(("system_ping", "target_row_strip", target_id))
+}
+
+/// Where the pointer let go of a row. `None` on every pass that held no release, which is most of them.
+///
+/// A drop has to be measured in the pass that reads the release event, and only egui's own drag bookkeeping knows about that
+/// event at that moment. A row cannot: `interaction::interact` works the events out in `begin_pass`, before a single widget of
+/// the pass exists, so the answer reaches a row as `drag_stopped()` one pass late — by which time `interact_pos` has moved on to
+/// wherever the pointer drifted next, and `latest_pos` is no longer a place the hand held. So the question is put here, where
+/// egui is asked while its answer is still true.
+struct DragRelease {
+    /// Which entry was in flight when the pointer let go, or `None` if what egui released was not one of the rows —
+    /// a slider or a button somewhere else. The entry is named by id rather than by row: a live drag has been reordering
+    /// the list all along, so only an id still means the same thing.
+    target: Option<usize>,
+    pos: Option<Pos2>,
+}
+
+/// Asks egui whether a pointer came to rest this pass, and if so where it did. See [`DragRelease`] for why the question has to
+/// be put at the top of a pass rather than where the answer is used.
+fn drag_release(ctx: &egui::Context) -> DragRelease {
+    // `drag_stopped_id` is egui's own note that a widget it had been dragging is no longer being dragged *this* pass — set
+    // from this pass's events, so unlike the row's `drag_stopped()` it does not arrive one pass late. Only our own rows can
+    // start a drag, so its id names the entry; [`strip_target`] turns it back into one.
+    DragRelease {
+        target: ctx.drag_stopped_id().and_then(strip_target),
+        pos: ctx.pointer_interact_pos(),
+    }
+}
+
+/// The target a row's click strip stands for, or `None` if this widget is not one of the rows.
+///
+/// `Id` keeps nothing but the hash of what it was made from, so [`strip_id`] cannot be undone and our own
+/// widgets have to be recognised by recomputing their ids. A target id is a small number — handed out from 0
+/// upward, one above the highest in use, and never renumbered — so the range that could match is known ahead of
+/// time and no bookkeeping of our own is needed.
+fn strip_target(id: Id) -> Option<usize> {
+    // Rows are only ever added between passes, never in the middle of one, and no user keeps thousands of
+    // targets — so this bound is generous rather than tight, and a miss would cost at most one gesture.
+    const ID_GUESS_LIMIT: usize = 4096;
+    (0..ID_GUESS_LIMIT).find(|target| strip_id(*target) == id)
+}
+
+/// The rows as the panel laid them out on its last completed pass, each with the entry it showed.
+///
+/// This is the layout the pointer has been travelling over, and the one both halves of a drag measure against: a pass publishes
+/// its rects only after its live move (see `move_now` in [`left_body`]), so between two passes there is exactly one answer to
+/// "where does row 3 stand" — which is what lets a slot counted here be handed straight to [`App::move_target`]. A row the panel
+/// never drew — an open editor's form, or one below a scrollbar's edge — keeps its `None` in here rather than being dropped: every
+/// consumer counts rows by position, and a hole that quietly vanished would shift every place below it up by one. So a point that
+/// belongs to no row has no answer and means "stay", which is sound for both halves: a live drag may simply stop following the
+/// pointer for one pass, and a place nobody ever drew was never aimed at.
+fn rows_prev_pass(app: &App) -> Vec<Option<Rect>> {
+    app.row_rects().to_vec()
+}
+
+/// How far the target list is scrolled right now, read back from where its rows were last drawn.
+///
+/// A scroll area does not keep its offset to itself: it hands back what it remembered only while the pointer hovers it and
+/// otherwise starts at the top of the content — which a drag finds out the hard way, because a press on a row does not hover the
+/// area any more once egui counts it as dragging a widget. The list would then jump up for exactly that pass: the pointer is
+/// still where it was and therefore over a different row than before, so the slot asked for is the one below the entry's own,
+/// which means "stay", and nothing moves for the rest of the gesture either because the entry never left its place. Naming the
+/// offset out loud at the call site is only half the fix; the other half is knowing what to ask for, and the rows know. A recorded
+/// strip was measured in the panel's own coordinates *after* the area had scrolled, so its distance from the top of the list —
+/// the first row's `min.y` — has the offset folded into it. Undoing that with the `min.y` the panel offers *now* gives the number
+/// to ask for, taken from the layout the pointer is actually aiming at rather than a remembered one.
+fn list_scroll_offset(app: &App, ui: &Ui) -> Option<f32> {
+    let first = app.target_row_rects().into_iter().next()?;
+    Some(ui.cursor().min.y - first.min.y)
+}
+
+/// Which row of the current layout shows the entry with this id, or `None` when no row does — which can only mean the panel drew
+/// none for it, so nothing was ever aimed at it. Counted in `rows`, and therefore in the same numbering as [`row_at`] answers with.
+fn row_of(rows: &[Option<Rect>], app: &App, id: usize) -> Option<usize> {
+    app.row_ids()
+        .iter()
+        .position(|drawn| *drawn == id)
+        .filter(|row| rows.get(*row).is_some_and(|rect| rect.is_some()))
+}
+
+/// The band a point is hit against for a row: the row's own click area plus whatever it takes for the rows of a
+/// list to meet without a seam.
+///
+/// A point that belongs to no widget at all is what egui resolves by picking the *nearest* widget, and a drop
+/// position should not be built on that — so the app decides for itself which row an in-between point counts
+/// as, by growing each row's band until they touch.
+///
+/// The gap goes entirely to the row above rather than being split evenly. A point between two rows has to mean
+/// "between them", and only a slot counted from the upper row can say that: `App::drop_index_for` answers
+/// "after this one" for every point below a row's centre, so handing the lower half of the gap to the row below
+/// would answer "before that one" for a point still above the upper row's own bottom edge — and for an entry
+/// being carried one row down, which is where a live drag always puts it, those two answers are the same place.
+/// The disagreement then shows up as a wobble: the pass says move, the next says stay, the pass after that says
+/// move again. With the gap above, every point between two rows means one slot and nothing oscillates.
+///
+/// Only the last row's band stops short of that. There is no row below it for a point in its lower gap to be confused
+/// with, so growing that band would claim empty space under the list as a place to drop into — which reads as "move to
+/// the very end" and quietly reorders a drag that was only meant to be a click. A release there therefore belongs to no
+/// row at all, and means "stay", like any other point outside the list.
+fn band(rect: Rect, last: bool) -> Rect {
+    if last {
+        rect
+    } else {
+        Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y + GAP_Y))
+    }
+}
+
+/// The gap between where a row's click area ends and the next one begins, or `None` for the last row — which has no neighbour to
+/// be separated from. See [`band`]: that gap is handed entirely to the row above, so it is the row above that owns it, and both
+/// halves of a drop decision have to own it the same way or they disagree about which slot a point in it names.
+fn below_gap(rect: Rect, last: bool) -> Option<Rect> {
+    (!last).then(|| {
+        Rect::from_min_max(
+            pos2(rect.min.x, rect.max.y),
+            pos2(rect.max.x, rect.max.y + GAP_Y),
+        )
+    })
+}
+
+/// Whether a point belongs to the strip itself or to the gap beneath it — and therefore which of two different rules decides the
+/// slot. Inside the strip the row's own middle is what matters; inside the gap there is no "this row" question to answer at all,
+/// only "after the upper one", so a point in a gap always names the place below its row whatever else has happened to the layout.
+fn in_gap(gap: Option<Rect>, pos: Pos2) -> bool {
+    gap.is_some_and(|gap| gap.contains(pos))
+}
+
+/// The place a row asks to be dropped at when the pointer rests on it: above its middle "in front of me", below it "after me".
+///
+/// `strip` is the row's own click area and `gap` the empty line beneath it, which [`band`] hands to this row rather than splitting
+/// between neighbours. The two are decided differently, and that split is what makes a live drag stop wobbling. Inside the strip the
+/// row's middle is the answer — but a band reaches past the strip so that bands meet without a seam, which puts the point where two
+/// of them touch exactly on the middle of the *strip between* them. Decided by that middle, the pass that had just moved an entry up
+/// would ask for the place below it again, because the pointer never left the band: the entry lands on a slot that means "stay" and
+/// the gesture dies there, one place short of where the hand stopped. So a point in the gap always names the place below its row —
+/// there is no "this row or that one" question to answer in an empty line, only "after the upper one", which is what the gap is for.
+fn drop_index_for_row(target_row: usize, pos: Pos2, strip: Rect, gap: Option<Rect>) -> usize {
+    if in_gap(gap, pos) || pos.y >= strip.center().y {
+        target_row + 1
+    } else {
+        target_row
+    }
+}
+
+/// The row a point belongs to in the layout this pass is measuring against: which row it was and where that row's click strip
+/// stood. `None` when the point belongs to no row at all, which is what makes "let go outside the list" mean "stay".
+///
+/// The band below each row counts as its lower half: the empty line between two rows belongs to "after the upper one", and
+/// without it such a point would answer with whichever row it happened to be nearest to. See [`band`] for why the last row gets
+/// no band and what that means for a point under the list.
+///
+/// The index counts `rows`, holes included (see [`rows_prev_pass`]), so it is the same numbering as [`App::targets`] — which is
+/// what lets an answer here be handed straight to [`App::move_target`] without saying anything about the layout it came from.
+fn row_at(rows: &[Option<Rect>], pos: Pos2) -> Option<(usize, Rect, Option<Rect>)> {
+    let last = rows.iter().rposition(|rect| rect.is_some())?;
+    rows.iter().enumerate().find_map(|(row, rect)| {
+        let rect = *rect.as_ref()?;
+        let gap = below_gap(rect, row == last);
+        band(rect, row == last)
+            .contains(pos)
+            .then_some((row, rect, gap))
+    })
+}
+
+/// Whether dragging an entry from `from` to `to` would actually change anything. A drop on the row it
+/// sits on, or just below it, means "stay" — and `move_target` says so in its own words, which a drag
+/// that went nowhere should not do.
+fn moves(from: usize, to: usize) -> bool {
+    to != from && to != from + 1
+}
+
+/// The slot a held drag asks for, or `None` when it asks for no move.
+///
+/// Counted from where the entry stands *today*, which is what keeps a live follow from chasing itself: an entry answered at its
+/// own current row asks "stay" the moment the pointer rests on it, so nothing wobbles between two passes. Measuring against a
+/// layout from further back would look tempting — it never changes — but it has been off the screen for every pass since, so a
+/// hand that moves faster than the list follows would be answered somewhere it stopped looking at long ago. The live follow only
+/// has to keep up with what the user can see.
+fn live_slot(app: &App, rows: &[Option<Rect>], carried: usize, pos: Pos2) -> Option<usize> {
+    let from = row_of(rows, app, carried)?;
+    let over = row_at(rows, pos)?;
+    slot_at(drop_index_for_row(over.0, pos, over.1, over.2), from)
+}
+
+/// The slot a release puts the carried entry in, or `None` when it asks for no move — which is what makes "let go outside the
+/// list" mean "stay".
+///
+/// Both numbers are counted in one and the same layout: [`row_at`] says which row of it the pointer came to rest on, and
+/// [`row_of`] where the entry stood when this pass began. A live drag has been carrying the entry under the cursor all along, so
+/// those two agree whenever the hand moved by whole rows — and that is why this answer needs no correction for how far the
+/// pointer travelled: a drop measured from the entry's own row asks for nothing, and any other place says where it goes.
+fn release_slot(app: &App, rows: &[Option<Rect>], release: &DragRelease) -> Option<usize> {
+    let from = row_of(rows, app, release.target?)?;
+    // Below the last row there is nothing to aim at, and a point in that empty space must not be read as the nearest row's
+    // lower half — see [`band`], which refuses to grow the last row for the same reason. But "below the list" *is* a place a
+    // hand means: it is the end of the list, and naming it directly is what keeps a drop past the last row from landing one
+    // row short of it. No row can have been added or removed while the pointer was over them, so the end of the list is still
+    // exactly one place past the last of them.
+    let over = match row_at(rows, release.pos?) {
+        Some(over) => over,
+        None if release.pos?.y > rows.iter().flatten().last()?.max.y => {
+            (rows.len(), Rect::NOTHING, None)
+        }
+        None => return None,
+    };
+    slot_at(
+        drop_index_for_row(over.0, release.pos?, over.1, over.2),
+        from,
+    )
+}
+
+/// Turns a place the pointer named into a slot for [`App::move_target`], or `None` when it has nothing to say.
+///
+/// Both numbers are counted in the same list — the one the move happens in — which is what makes this only about
+/// "is that already its own place": `to` is the index measured off the rows the pointer was aimed at, with the carried
+/// entry still standing in it, and `from` is where the entry stands in that same list. The move takes the entry out of
+/// that list first and inserts it at the requested place, so a slot just past the entry's own row already *is* its
+/// own place: pulling a row down by less than a whole row means "stay", and `move_target` would say so in its own
+/// words, which a drag that went nowhere should not do. That is also why nothing has to be done about a press that
+/// never became a drag: egui calls one of those a click, so the gesture is never even started and no row is asked.
+fn slot_at(to: usize, from: usize) -> Option<usize> {
+    if moves(from, to) {
+        Some(to)
+    } else {
+        None
+    }
+}
+
+/// The panel's contents on their own. Tests call this directly so they can place the panel
+/// somewhere they control and click or drag a row with a synthetic pointer.
 pub fn left_body(ui: &mut Ui, app: &mut App) {
     let lang = app.lang();
-    // Which row the current click belongs to, decided once before the rows are built. The rects
-    // come from the previous pass; a real click always follows a pass that drew the rows.
-    let clicked_row = clicked_in_row(ui.ctx(), &app.row_rects);
+    // Which entry the current click landed on, decided once before the rows are built. The rects come from the previous
+    // pass; a real click always follows a pass that drew the rows. Resolved to an entry immediately: `clicked_in_row`
+    // counts drawn rows, and this loop is free to move entries through the list before it acts on the answer.
+    let clicked_on = clicked_in_row(ui.ctx(), &app.target_row_rects())
+        .and_then(|drawn| app.row_target_of_undrawn_row(drawn));
     // A click inside one of the editor's own controls (a text field, the combo box, a button) must
     // not be mistaken for "this row was clicked again", so that case is ignored here. The editor
     // only closes through its buttons, Enter/Esc, or a click on another row.
-    let clicked_row = match clicked_row {
-        Some(row) if app.edit_idx == Some(row) => None,
+    let clicked_on = match clicked_on {
+        Some(id) if app.edit_id() == Some(id) => None,
         other => other,
     };
+    // Which entry is in flight, decided once for the whole pass. See the row loop below for why this
+    // cannot be asked per row: the move at the end of this pass relocates the entry, and from that moment on
+    // `app.drag_row` no longer matches the row that is being drawn — only its id still does.
+    let in_flight = app.drag_row;
+    // Which entry egui says it is dragging, asked of egui rather than read from `app.drag_row`. This is the answer that
+    // matters for a drop: egui only lets go of a widget in the very pass whose events hold the release, and that is the
+    // one pass in which the gesture can be measured (see [`DragRelease`]). `app.drag_row` lags behind it by one pass —
+    // it is set from `drag_started()`, which reaches a row late for the same reason `drag_stopped()` does.
+    let carried_id = ui.ctx().dragged_id().and_then(strip_target).or(in_flight);
+    // Where every row stood on the pass before this one — see [`rows_prev_pass`]. Taken here, at the very start of the pass:
+    // the live move below relocates rows once this pass has drawn them, and from that moment on `App::targets` describes a
+    // layout the pointer never saw. Both halves of the gesture measure against these same rows, so one cannot answer for a
+    // layout the other has already shuffled out from under it.
+    let rows = rows_prev_pass(app);
+    // Before a single row of this pass is laid out: see [`drag_release`].
+    let release = drag_release(ui.ctx());
+    // The slot a held drag asks for, computed here — before this pass lays out any row. Once the move has happened at the end
+    // of the loop, this pass's own rows describe places the pointer never saw, so waiting for the loop to ask is too late.
+    let drop_now = match (carried_id, release.target) {
+        // A release is what ends a drag and decides where the entry finally lands, so on the pass that holds one the live
+        // follow keeps its hands off: the two halves must never both move the list for one gesture.
+        (Some(_), Some(_)) => None,
+        // Where the pointer is with the button still held: the entry follows it while it travels.
+        (Some(id), None) => ui
+            .input(|i| i.pointer.interact_pos())
+            .and_then(|pos| live_slot(app, &rows, id, pos)),
+        (None, _) => None,
+    };
+    // A drag ends with the pointer released over a row, and egui reports that same release as a click
+    // on it — so while an entry is carried, a press+release on one of the rows cannot mean "open its
+    // editor": it was the pull that moved it. Checked against the rows themselves rather than through
+    // `clicked_row`, because egui's `interact_pos` still holds the position from *before* the release,
+    // which for a drop is the row the drag started on — and opening that editor would also refuse the
+    // move, since `App::move_target` waits for a form to be closed.
+    let released_a_drag = carried_id.is_some() && ui.input(|i| i.pointer.any_released());
+    let clicked_on = if released_a_drag { None } else { clicked_on };
     let m = app.theme_mode;
     ui.horizontal(|ui| {
         ui.label(RichText::new(lang.targets()).strong());
@@ -462,386 +758,675 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
     });
     ui.separator();
 
+    // The release this pass has to act on, if any. It is decided after the row loop — see there — so it only needs to survive
+    // as a local; nothing about a drop depends on what the rows of this pass happen to be.
+    let release = release.target.map(|_| release);
+
     let now = app.engine.elapsed_secs();
     // Reused scratch buffer for the per-target statistics shown in the editor.
     let mut scratch = std::mem::take(&mut app.stats_scratch);
 
-    ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Collect actions first to avoid borrow conflicts.
-            let mut edit_action: Option<fn(&mut App)> = None;
-            let mut begin_edit_idx: Option<usize> = None;
-            // Set by the "entfernen" button inside an open editor: which target to delete once the
-            // list is no longer borrowed.
-            let mut remove_idx: Option<usize> = None;
-            // A colour change has to be written back to disk right away, like every other setting.
-            let mut color_changed = false;
-            // Filled with every row's click area while the rows are built, then handed to
-            // `app.row_rects` below. A test needs those rects to aim a synthetic click.
-            let mut row_rects = Vec::new();
-            let mut row_heights = Vec::new();
+    // While a row is in flight the list is held at the scroll position its recorded rows were drawn at, and that is done by
+    // naming the offset out loud rather than by switching scrolling off. Both halves of the gesture read `App::row_rects`,
+    // which describes where the rows stood when they were drawn; anything that moves the viewport therefore has to move those
+    // rects with it, and a scroll area does not: it scrolls its content while the recorded strips stay put, so the pointer
+    // ends up aiming at a layout nobody is looking at. There is also a plainer failure waiting in egui — an area only restores
+    // the offset it remembered while the pointer hovers it, so a pass that is not hovering starts at zero and the whole list
+    // jumps to the top for that one frame. `scroll_offset` asks for the offset this call rather than whatever happens to be
+    // remembered, which keeps the rows exactly where the pass that recorded them drew them. As soon as the hand opens, the
+    // area is free again.
+    let mut area = ScrollArea::vertical().auto_shrink([false, false]);
+    if in_flight.is_some() {
+        if let Some(offset) = list_scroll_offset(app, ui) {
+            area = area.vertical_scroll_offset(offset);
+        }
+    }
+    area.show(ui, |ui| {
+        // Collect actions first to avoid borrow conflicts. All of them name the *entry* they act on, never a row:
+        // this loop draws rows in the order `order` fixed for it, and a live move at its end can leave every index
+        // in `app.targets` pointing somewhere else than the row that decided the action.
+        let mut edit_action: Option<fn(&mut App)> = None;
+        let mut begin_edit_idx: Option<usize> = None;
+        // Set by the "entfernen" button inside an open editor: which target to delete once the
+        // list is no longer borrowed.
+        let mut remove_idx: Option<usize> = None;
+        // A colour change has to be written back to disk right away, like every other setting.
+        let mut color_changed = false;
+        // Filled with every row's click area while the rows are built, then handed to `app.row_rects` below. A
+        // test needs those rects to aim a synthetic click, and so does a drag that is still held — see the slot
+        // computation above, which reads them one pass behind this loop.
+        //
+        // One entry per row of `order`, in that order, with a hole left as `None` where an open editor drew its form
+        // instead of a row (see `row_heights`). The holes are what keeps the two answers lined up: `clicked_in_row`
+        // counts these positions to say which row was clicked, and `row_of` counts them to say which row a pointer is
+        // over, so both have to be counting the same rows — including the ones that were not drawn.
+        let mut row_rects = Vec::new();
+        // The same strips again, but only their heights: an open editor draws a form instead of its
+        // row, and the list must not shift under the neighbours around it (see `App::row_heights`).
+        // Counted in the order of `order`, so index `i` is the height the row of `order[i]` had last pass — which is
+        // what makes this the right answer for a row whose entry has since been carried elsewhere.
+        let mut row_heights = Vec::new();
+        // And which entry each of those rows showed, so the two can be read together by id later on (see `App::row_ids`).
+        let mut row_ids = Vec::new();
 
-            for idx in 0..app.targets.len() {
-                // Everything the row and the editor need from this target is read out here, so the
-                // rest of the body never has to borrow `app.targets` again. The editor below needs
-                // `app` mutably (its fields are the form's state), which a live borrow would forbid.
-                let t = &app.targets[idx];
-                let color = app.status_color(t);
-                // The line colour of this target, shown next to the status dot so the row already
-                // says which trace in the chart belongs to it.
-                let trace = app.trace_color(t);
-                let txt = app.status_text(t);
-                let sel = app.selected == idx;
-                let editing_here = app.edit_idx == Some(idx);
-                let secs_ago = if t.last_probe_secs > 0.0 {
-                    now - t.last_probe_secs
-                } else {
-                    -1.0
-                };
-                let label = t.label.clone();
-                let host = t.host.clone();
-                let kind_label = lang.kind(t.kind).to_string();
-                let enabled = t.enabled;
-                let auto_idx = app.color_idx_of(t);
-                // Which palette slot this line uses, said plainly: automatic or picked by hand.
-                // Shown as a tooltip on the colour dash in the row.
-                let trace_tip = if auto_idx == crate::app::AUTO_COLOR {
-                    lang.tip_color_auto().to_string()
-                } else {
-                    i18n::fill(
-                        lang.tip_color_chosen_fmt(),
-                        &[("n", (auto_idx + 1).to_string())],
-                    )
-                };
-                // Details for this one target: how much history is kept, and what it says about
-                // the current window.
-                let horizon = app.options.horizon_secs as f64;
-                let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
-                let st = t.series.stats_window(from, f64::MAX, &mut scratch);
+        // The live move this pass asks for, held back until every row has been drawn. Applying it inside the loop
+        // would reorder `app.targets` halfway through the pass: the rows after it would then be laid out in a list
+        // that no longer matches `order`, so an entry would be drawn twice while another was skipped and fell out of
+        // `row_rects` — which reads as "the pointer is on nothing" for the rest of the drag, and as a target that has
+        // vanished. One move per pass, applied once at the end, keeps this pass' geometry whole: the rows it drew are
+        // exactly the rows the next pass measures against.
+        let mut move_now: Option<(usize, usize)> = None;
 
-                // While a row is being edited, show its settings instead of the label. The editor
-                // is deliberately *not* one of `row_rects`: it is a form with real controls, and a
-                // click on one of them must never be read as "this row was clicked again".
-                if editing_here {
-                    // Keep the row's click area alive while it is being edited. It has to cover
-                    // exactly the same spot as before, otherwise the list would shift and a click
-                    // aimed at a neighbour would land somewhere else. `clicked_in_row` ignores a
-                    // click on the row that is already open, so the editor's own controls are safe.
-                    let h = app.row_heights.get(idx).copied().unwrap_or(39.0);
-                    let (rect, _) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), h),
-                        egui::Sense::hover(),
-                    );
-                    row_rects.push(rect);
+        // The list this pass draws, fixed before the first row is built: the ids, in the order they are to be drawn.
+        // Walking indices instead would let a live move below reassign the loop mid-flight — `app.targets` is
+        // reordered while this runs, so an index would name a different entry than the pass had planned and a row
+        // would be drawn twice while another was skipped entirely. The ids are what every decision in the loop is
+        // taken against: which row carries the entry, which one is being edited, where the selection sits.
+        let order: Vec<usize> = app.targets.iter().map(|t| t.id).collect();
 
-                    // The panel is only 250 px wide, so the editor has to stay tight.
-                    ui.style_mut().spacing.item_spacing.y = 3.0;
+        // Where the panel's own bottom edge is — the height past which a row cannot be seen at all. A scroll area lets
+        // its content grow beyond what it shows, so without this a list longer than the panel would keep registering
+        // strips in space nobody can look at, and both halves of a drag would then answer for rows that are not on
+        // screen: the pointer is over row 2 while an invisible row 5 says "I am the last one" and the whole numbering
+        // shifts. Only rows inside this line are recorded, so what the layout knows and what the user can see stay one
+        // and the same thing.
+        let visible_until = ui.available_rect_before_wrap().max.y;
 
-                    let frame = egui::Frame::new()
-                        .fill(m.row_fill(true))
-                        .corner_radius(5.0)
-                        .inner_margin(egui::Margin::symmetric(7, 6));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (dot_rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
-                            let dot_rect = dot_rect.shrink(1.5);
-                            ui.painter().rect_filled(dot_rect, 5.5, color);
-                            // The colour dash: the same colour as the line in the chart, so the list
-                            // alone already says which curve belongs to which target.
-                            let (line_rect, _) =
-                                ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
-                            ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
-                            // Getting rid of the target one is working on: replaces the "remove
-                            // target" button in the top right, which hit the selected target and so
-                            // easily grabbed the wrong one.
-                            if ui
-                                .small_button(
-                                    RichText::new(lang.remove_short()).color(m.danger_text()),
-                                )
-                                .on_hover_text(i18n::fill(
-                                    lang.tip_remove_fmt(),
-                                    &[("label", label.clone())],
-                                ))
-                                .clicked()
-                            {
-                                remove_idx = Some(idx);
-                            }
-                            ui.label(RichText::new(lang.edit_heading()).strong().size(12.0));
-
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button("✕")
-                                        .on_hover_text(lang.tip_discard_edit())
-                                        .clicked()
-                                    {
-                                        edit_action = Some(App::cancel_edit);
-                                    }
-                                },
-                            );
-                        });
-
-                        // Name and address.
-                        ui.add_sized(
-                            [215.0, 20.0],
-                            egui::TextEdit::singleline(&mut app.edit_label)
-                                .hint_text(lang.hint_new_label())
-                                .vertical_align(egui::Align::Center),
-                        );
-                        ui.add_sized(
-                            [215.0, 20.0],
-                            egui::TextEdit::singleline(&mut app.edit_host)
-                                .hint_text(lang.hint_address())
-                                .font(FontId::monospace(12.5))
-                                .vertical_align(egui::Align::Center),
-                        );
-
-                        // Category and whether to measure it at all.
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt("edit_kind")
-                                .width(96.0)
-                                .selected_text(RichText::new(lang.kind(app.edit_kind)).size(12.0))
-                                .show_ui(ui, |ui| {
-                                    for k in TargetKind::all() {
-                                        ui.selectable_value(&mut app.edit_kind, k, lang.kind(k));
-                                    }
-                                });
-                            ui.add_enabled_ui(!app.edit_host.trim().is_empty(), |ui| {
-                                ui.checkbox(&mut app.edit_enabled, lang.measures_checkbox())
-                                    .on_hover_text(lang.tip_measures());
-                            });
-                        });
-
-                        // The line colour. Left alone, the palette hands one out by position in the
-                        // list; touching anything here stores a fixed number that yields the same
-                        // colour after a restart and across re-sorting. The button doubles as the
-                        // preview: it shows exactly the shade the chart paints.
-                        let picked = app.edit_color_idx != app::AUTO_COLOR;
-                        let shown_idx = if picked { app.edit_color_idx } else { auto_idx };
-                        let swatch_name = if picked {
-                            theme::swatch(app.edit_color_idx).name(lang)
-                        } else {
-                            lang.auto_color()
-                        };
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt("edit_color")
-                                .width(96.0)
-                                .selected_text(RichText::new(swatch_name).size(12.0))
-                                .show_ui(ui, |ui| {
-                                    for (n, s) in theme::PALETTE.iter().enumerate() {
-                                        if ui
-                                            .selectable_value(
-                                                &mut app.edit_color_idx,
-                                                n,
-                                                RichText::new(s.name(lang)).size(12.0),
-                                            )
-                                            .changed()
-                                        {
-                                            color_changed = true;
-                                        }
-                                    }
-                                });
-                            ui.painter().rect_filled(
-                                ui.available_rect_before_wrap().shrink(4.0),
-                                2.0,
-                                m.swatch(shown_idx),
-                            );
-                            ui.allocate_at_least(Vec2::new(18.0, 16.0), egui::Sense::hover());
-                            if ui
-                                .small_button(lang.auto_color())
-                                .on_hover_text(lang.tip_color_auto_btn())
-                                .clicked()
-                            {
-                                app.edit_color_idx = app::AUTO_COLOR;
-                                color_changed = true;
-                            }
-                        });
-
-                        // Details: what the stored history says about this target.
-                        let avg = if st.replies > 0 {
-                            format!("ø {} ms", crate::app::fmt_ms(st.avg as f32))
-                        } else {
-                            "ø —".to_string()
-                        };
-                        let span = if st.replies > 0 {
-                            format!(
-                                "{} / {} ms",
-                                crate::app::fmt_ms(st.min),
-                                crate::app::fmt_ms(st.max)
-                            )
-                        } else {
-                            "— / — ms".to_string()
-                        };
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                kind_label,
-                                if enabled {
-                                    lang.active()
-                                } else {
-                                    lang.paused()
-                                }
-                            ))
-                            .weak()
-                            .size(11.0),
-                        );
-                        ui.label(
-                            RichText::new(i18n::fill(
-                                lang.values_span_fmt(),
-                                &[
-                                    ("replies", st.replies.to_string()),
-                                    ("total", st.total.to_string()),
-                                    ("avg", avg.clone()),
-                                ],
-                            ))
-                            .weak()
-                            .size(11.0)
-                            .monospace(),
-                        );
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                span,
-                                i18n::fill(lang.loss_count_fmt(), &[("n", st.losses.to_string())])
-                            ))
-                            .weak()
-                            .size(11.0)
-                            .monospace(),
-                        );
-
-                        ui.horizontal(|ui| {
-                            if ui.button(lang.save_btn()).clicked() {
-                                edit_action = Some(App::commit_edit);
-                            }
-                            if ui.button(lang.cancel_btn()).clicked() {
-                                edit_action = Some(App::cancel_edit);
-                            }
-                        });
-
-                        // Enter commits, Escape cancels.
-                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                        if enter {
-                            edit_action = Some(App::commit_edit);
-                        } else if escape {
-                            edit_action = Some(App::cancel_edit);
-                        }
-                    });
+        for (row, id) in order.iter().copied().enumerate() {
+            // Everything the row and the editor need from this target is read out here, so the
+            // rest of the body never has to borrow `app.targets` again. The editor below needs
+            // `app` mutably (its fields are the form's state), which a live borrow would forbid.
+            //
+            // Everything that says "this row" is asked by id rather than by position, for the same reason `in_flight`
+            // is read once outside the loop: a drop below moves the entry through the list while this loop runs, and
+            // from that moment on every index in the list — including this row's own — describes a different order
+            // than the one being drawn.
+            let Some(idx) = app.targets.iter().position(|t| t.id == id) else {
+                continue;
+            };
+            // Whether this row still fits where the panel can show it, decided before anything is read or drawn: a row
+            // past that edge is not part of the layout at all (see `visible_until`), so there is no point measuring what
+            // it would cost. The height is the one the row had last pass — an open editor's form is far taller than its
+            // row, and the list must not shift under the neighbours around it (see `App::row_heights`).
+            let row_h = app.row_heights.get(row).copied().unwrap_or(ROW_H - GAP_Y);
+            let strip_rect = if ui.cursor().min.y + row_h <= visible_until {
+                Some(Rect::from_min_size(
+                    ui.cursor().min,
+                    Vec2::new(ui.available_width(), row_h),
+                ))
+            } else {
+                None
+            };
+            let t = &app.targets[idx];
+            let color = app.status_color(t);
+            // The line colour of this target, shown next to the status dot so the row already
+            // says which trace in the chart belongs to it.
+            let trace = app.trace_color(t);
+            let txt = app.status_text(t);
+            let sel = app.selected == idx;
+            // Asked by id, not by `row`: a live move earlier in this very loop has already changed where the edited
+            // entry sits, and its form must keep following the entry it belongs to.
+            let editing_here = app.edit_id() == Some(id);
+            let secs_ago = if t.last_probe_secs > 0.0 {
+                now - t.last_probe_secs
+            } else {
+                -1.0
+            };
+            let label = t.label.clone();
+            let host = t.host.clone();
+            let kind_label = lang.kind(t.kind).to_string();
+            let enabled = t.enabled;
+            let auto_idx = app.color_idx_of(t);
+            // Which palette slot this line uses, said plainly: automatic or picked by hand.
+            // Shown as a tooltip on the colour dash in the row.
+            let trace_tip = if auto_idx == crate::app::AUTO_COLOR {
+                lang.tip_color_auto().to_string()
+            } else {
+                i18n::fill(
+                    lang.tip_color_chosen_fmt(),
+                    &[("n", (auto_idx + 1).to_string())],
+                )
+            };
+            // Details for this one target: how much history is kept, and what it says about
+            // the current window.
+            let horizon = app.options.horizon_secs as f64;
+            let from = t.series.last().map_or(0.0, |s| s.t_secs - horizon);
+            let st = t.series.stats_window(from, f64::MAX, &mut scratch);
+            // A row that is being carried is drawn faded and cannot be edited or grabbed again —
+            // one drag at a time, and the ghost says which entry is in flight.
+            let id = t.id;
+            let carried = in_flight == Some(id);
+            let strip_rect = match strip_rect {
+                Some(rect) => rect,
+                None => {
+                    // A row the panel cannot show: it is not part of the layout, so no click and no drop can be aimed at
+                    // it (see `visible_until`). Nothing is recorded for it and nothing is drawn for it.
                     continue;
                 }
+            };
+            // While a row is being edited, show its settings instead of the label. The editor
+            // is deliberately *not* one of `row_rects`: it is a form with real controls, and a
+            // click on one of them must never be read as "this row was clicked again".
+            if editing_here {
+                // Keep the row's click area alive while it is being edited, at exactly the height
+                // the finished row had — otherwise the list would shift and a click aimed at a
+                // neighbour would land somewhere else. It is *not* added to `row_rects`: an open
+                // form has real controls, and a drop must not be aimed at a field of it. The strip
+                // still senses clicks, so closing the editor by clicking its row works — but only up
+                // to that height: the form below it belongs to its fields alone.
+                let h = strip_rect.height();
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), h), egui::Sense::hover());
+                // This row occupies a place in the layout without offering a drop target, so it is a hole: `None` in
+                // `row_rects`, but its entry still counts, or every place below it would shift up by one (see there).
+                row_ids.push(id);
+                row_rects.push(None);
+                row_heights.push(h);
 
-                let mut frame = egui::Frame::new()
-                    .fill(m.row_fill(sel))
+                // The panel is only 250 px wide, so the editor has to stay tight.
+                ui.style_mut().spacing.item_spacing.y = 3.0;
+
+                let frame = egui::Frame::new()
+                    .fill(m.row_fill(true))
                     .corner_radius(5.0)
-                    .inner_margin(egui::Margin::symmetric(7, 5));
-                // A row is a button. `Frame::show` only ever registers `Sense::hover()`, so the
-                // click area has to be claimed separately: first a strip of fixed height that
-                // senses clicks, then the frame painted on top of it. Hovering brightens the strip
-                // and shows the pointer cursor, which says "a click opens the editor". Labels stay
-                // non-selectable so none of them swallows the press that belongs to the row.
-                let (strip_rect, strip) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), ROW_H),
-                    egui::Sense::click(),
-                );
-                let strip = strip.on_hover_cursor(CursorIcon::PointingHand);
-                if strip.hovered() {
-                    frame.fill = m.row_fill(true);
-                }
-                // The row's content goes into a child ui pinned to that strip, so the frame is
-                // painted exactly on the click area and cannot shift the list. `new_child` gives us
-                // the child directly; its used rect is handed back to the list by `prepared.end`.
-                let mut prepared =
-                    frame.begin(&mut ui.new_child(egui::UiBuilder::new().max_rect(strip_rect)));
-                {
-                    let ui = &mut prepared.content_ui;
+                    .inner_margin(egui::Margin::symmetric(7, 6));
+                frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let (dot_rect, _) =
                             ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
                         let dot_rect = dot_rect.shrink(1.5);
                         ui.painter().rect_filled(dot_rect, 5.5, color);
-                        // A dash in the line colour: reading the list, one immediately sees which
-                        // curve in the chart belongs to this target. The dash is as tall as the dot
-                        // so the two form one line instead of looking misaligned.
+                        // The colour dash: the same colour as the line in the chart, so the list
+                        // alone already says which curve belongs to which target.
                         let (line_rect, _) =
                             ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
                         ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
-                        // What the dash means: an automatic or a hand-picked line colour. The knob is
-                        // the same one as in the chart so both places mean the same thing.
-                        let knob = Rect::from_center_size(
-                            line_rect.center(),
-                            Vec2::splat(crate::theme::LEGEND_KNOB),
-                        );
-                        ui.put(knob, Label::new("").selectable(false))
-                            .on_hover_text(&trace_tip);
-                        // The dash belongs to the text: spacing first, then the label.
-                        ui.add_space(7.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.add(
-                                Label::new(RichText::new(label).strong().size(13.0))
-                                    .selectable(false),
-                            );
-                            let age = if secs_ago < 0.0 {
-                                lang.not_probed_yet().to_string()
-                            } else {
-                                i18n::fill(
-                                    lang.ago_fmt(),
-                                    &[("n", (secs_ago.max(0.0) as i64).to_string())],
-                                )
-                            };
-                            ui.add(
-                                Label::new(
-                                    RichText::new(format!("{host} · {age}")).weak().size(11.0),
-                                )
-                                .selectable(false),
-                            );
-                        });
+                        // Getting rid of the target one is working on: replaces the "remove
+                        // target" button in the top right, which hit the selected target and so
+                        // easily grabbed the wrong one.
+                        if ui
+                            .small_button(RichText::new(lang.remove_short()).color(m.danger_text()))
+                            .on_hover_text(i18n::fill(
+                                lang.tip_remove_fmt(),
+                                &[("label", label.clone())],
+                            ))
+                            .clicked()
+                        {
+                            remove_idx = Some(idx);
+                        }
+                        ui.label(RichText::new(lang.edit_heading()).strong().size(12.0));
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add(
-                                Label::new(RichText::new(&txt).color(color).monospace().size(12.0))
-                                    .selectable(false),
-                            );
+                            if ui
+                                .small_button("✕")
+                                .on_hover_text(lang.tip_discard_edit())
+                                .clicked()
+                            {
+                                edit_action = Some(App::cancel_edit);
+                            }
                         });
                     });
-                }
-                // Closes the frame: paints it over the strip and hands its area back to the list.
-                prepared.end(ui);
 
-                // The strip allocated above is the row's click area. It is stored on the app and
-                // used by `clicked_in_row` (and by the click test) on the next pass, so a click
-                // still lands on the row it was aimed at even though the frame paints over it.
-                row_rects.push(strip_rect);
-                row_heights.push(strip_rect.height());
-                if clicked_row == Some(idx) || strip.clicked() {
-                    begin_edit_idx = Some(idx);
+                    // Name and address.
+                    ui.add_sized(
+                        [215.0, 20.0],
+                        egui::TextEdit::singleline(&mut app.edit_label)
+                            .hint_text(lang.hint_new_label())
+                            .vertical_align(egui::Align::Center),
+                    );
+                    ui.add_sized(
+                        [215.0, 20.0],
+                        egui::TextEdit::singleline(&mut app.edit_host)
+                            .hint_text(lang.hint_address())
+                            .font(FontId::monospace(12.5))
+                            .vertical_align(egui::Align::Center),
+                    );
+
+                    // Category and whether to measure it at all.
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("edit_kind")
+                            .width(96.0)
+                            .selected_text(RichText::new(lang.kind(app.edit_kind)).size(12.0))
+                            .show_ui(ui, |ui| {
+                                for k in TargetKind::all() {
+                                    ui.selectable_value(&mut app.edit_kind, k, lang.kind(k));
+                                }
+                            });
+                        ui.add_enabled_ui(!app.edit_host.trim().is_empty(), |ui| {
+                            ui.checkbox(&mut app.edit_enabled, lang.measures_checkbox())
+                                .on_hover_text(lang.tip_measures());
+                        });
+                    });
+
+                    // The line colour. Left alone, the palette hands one out by position in the
+                    // list; touching anything here stores a fixed number that yields the same
+                    // colour after a restart and across re-sorting. The button doubles as the
+                    // preview: it shows exactly the shade the chart paints.
+                    let picked = app.edit_color_idx != app::AUTO_COLOR;
+                    let shown_idx = if picked { app.edit_color_idx } else { auto_idx };
+                    let swatch_name = if picked {
+                        theme::swatch(app.edit_color_idx).name(lang)
+                    } else {
+                        lang.auto_color()
+                    };
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("edit_color")
+                            .width(96.0)
+                            .selected_text(RichText::new(swatch_name).size(12.0))
+                            .show_ui(ui, |ui| {
+                                for (n, s) in theme::PALETTE.iter().enumerate() {
+                                    if ui
+                                        .selectable_value(
+                                            &mut app.edit_color_idx,
+                                            n,
+                                            RichText::new(s.name(lang)).size(12.0),
+                                        )
+                                        .changed()
+                                    {
+                                        color_changed = true;
+                                    }
+                                }
+                            });
+                        ui.painter().rect_filled(
+                            ui.available_rect_before_wrap().shrink(4.0),
+                            2.0,
+                            m.swatch(shown_idx),
+                        );
+                        ui.allocate_at_least(Vec2::new(18.0, 16.0), egui::Sense::hover());
+                        if ui
+                            .small_button(lang.auto_color())
+                            .on_hover_text(lang.tip_color_auto_btn())
+                            .clicked()
+                        {
+                            app.edit_color_idx = app::AUTO_COLOR;
+                            color_changed = true;
+                        }
+                    });
+
+                    // Details: what the stored history says about this target.
+                    let avg = if st.replies > 0 {
+                        format!("ø {} ms", crate::app::fmt_ms(st.avg as f32))
+                    } else {
+                        "ø —".to_string()
+                    };
+                    let span = if st.replies > 0 {
+                        format!(
+                            "{} / {} ms",
+                            crate::app::fmt_ms(st.min),
+                            crate::app::fmt_ms(st.max)
+                        )
+                    } else {
+                        "— / — ms".to_string()
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            kind_label,
+                            if enabled {
+                                lang.active()
+                            } else {
+                                lang.paused()
+                            }
+                        ))
+                        .weak()
+                        .size(11.0),
+                    );
+                    ui.label(
+                        RichText::new(i18n::fill(
+                            lang.values_span_fmt(),
+                            &[
+                                ("replies", st.replies.to_string()),
+                                ("total", st.total.to_string()),
+                                ("avg", avg.clone()),
+                            ],
+                        ))
+                        .weak()
+                        .size(11.0)
+                        .monospace(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            span,
+                            i18n::fill(lang.loss_count_fmt(), &[("n", st.losses.to_string())])
+                        ))
+                        .weak()
+                        .size(11.0)
+                        .monospace(),
+                    );
+
+                    ui.horizontal(|ui| {
+                        if ui.button(lang.save_btn()).clicked() {
+                            edit_action = Some(App::commit_edit);
+                        }
+                        if ui.button(lang.cancel_btn()).clicked() {
+                            edit_action = Some(App::cancel_edit);
+                        }
+                    });
+
+                    // Enter commits, Escape cancels.
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if enter {
+                        edit_action = Some(App::commit_edit);
+                    } else if escape {
+                        edit_action = Some(App::cancel_edit);
+                    }
+                });
+                continue;
+            }
+
+            // The row's frame is drawn *exactly* on the strip allocated below, by giving its content the
+            // height that is left after its own padding. Left to itself, a frame sizes its content from what
+            // goes into it — two lines of text plus the item spacing between them — and that total is not the
+            // same number twice running: egui caches a label's galley, so the first pass measures the text and
+            // every pass after it gets the cached size. Rows crept a point further down each time they were
+            // drawn, which is invisible in a resting list but ruins a drag: the rows are measured against the
+            // strips they were drawn with, so after a few passes of a held pull the last row was registered
+            // several points below where it appeared and a drop aimed at it landed on the row before.
+            //
+            // `inner_margin` rather than `outer_margin`, because egui's `Frame::begin` subtracts *both* margins
+            // from the rect it is handed (`total_margin`) and lets the content grow out of what is left, so any
+            // margin at all makes an unconstrained frame taller than the strip it was given.
+            let mut frame = egui::Frame::new()
+                .fill(m.row_fill(sel))
+                .corner_radius(5.0)
+                .inner_margin(egui::Margin::symmetric(7, 5));
+            let content_height = (ROW_H - GAP_Y - frame.inner_margin.topf() * 2.0).max(0.0);
+            if carried {
+                // The row in flight is painted as a ghost of itself: still in place, so the
+                // list does not jump around while the pointer looks for a new spot.
+                frame.fill = m.row_fill(true);
+                frame.fill = frame.fill.linear_multiply(0.45);
+            }
+            // A row is a button. `Frame::show` only ever registers `Sense::hover()`, so the
+            // click area has to be claimed separately: first the strip allocated below, then the
+            // frame painted on top of it. Hovering brightens the strip and shows the pointer
+            // cursor, which says "a click opens the editor". Labels stay non-selectable so none
+            // of them swallows the press that belongs to the row.
+            //
+            // On top of that a drop needs an answer to "which row is the pointer standing in", and
+            // neither of the two obvious ways to get one works:
+            //
+            // - `hovered()` cannot answer it. While an entry is carried egui marks only the widget
+            //   it is dragging as hovered, and a release always goes back to the widget that was
+            //   pressed — no other row ever reports anything.
+            // - A taller *allocated* area cannot answer it either, because allocation is layout: a
+            //   band reserved for row 0 pushes every row below it down, and the rows would stop
+            //   being where the pointer expects them. The list has to keep its exact pitch.
+            //
+            // So the band is not allocated but computed from the strip: it reaches through the empty
+            // line below the row up to the next row's top edge, which costs no layout space and makes
+            // the rows cover the list without a seam. That matters because egui's answer for a point
+            // that belongs to no widget is to pick the *nearest* one — not something a drop position
+            // should be built on. `row_rects` keeps the strip alone: that is what a click lands on.
+            // The strip is registered under the target's own id, so egui knows it by name instead of by position.
+            // That is what lets a drag hold on to its entry across a reordering: an id follows the entry, a position
+            // or an index does not. It is also how `strip_target` recognises our own widgets in egui's record of a
+            // pass, which is where the release geometry comes from (see [`DragRelease`]).
+            //
+            // `new_child` is what makes that name exact, and it matters that it is: every other way of
+            // getting a widget id in egui mixes in `next_auto_id_salt`, a counter that runs while the rows
+            // are being built. A scope salted with `push_id` registers its child as
+            // `strip_id(id).with(counter)`, so the name changes the moment a row above appears, disappears
+            // or changes height — which is exactly what a live drag does. Holding on to such an id would
+            // lose the row on the pass that reordered the list. Here the strip is allocated in a child ui
+            // whose own id *is* `strip_id(id)`, and `interact` registers that id itself.
+            // The strip is allocated *before* anything else, because everything below is measured against it: the
+            // frame painted on it, the grip drawn over it, and above all `row_rects`, which is what a click and both
+            // halves of a drag are aimed with.
+            let strip_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(strip_id(id))
+                    .max_rect(ui.max_rect()),
+            );
+            // The row's click area is *this* rect, and it has to be measured against this exact place: the live move
+            // below can reorder the list while this pass is still drawing, so a point that was over this row when the
+            // pointer passed over it is not necessarily over it any more. `strip_rect` therefore goes into `row_rects`
+            // (see below), and egui's own answer for the widget is only ever used for what a widget can say about its
+            // own press — hover, drag start, click — never for where anything is.
+            let strip = strip_ui.interact(strip_rect, strip_id(id), egui::Sense::click_and_drag());
+            ui.advance_cursor_after_rect(strip_rect);
+            let mut strip = strip.on_hover_cursor(if in_flight == Some(id) {
+                CursorIcon::Grabbing
+            } else {
+                CursorIcon::PointingHand
+            });
+            if strip.hovered() {
+                frame.fill = m.row_fill(true);
+            }
+            // The same press that opens the editor on a quick click becomes a drag as soon as
+            // the pointer travels: holding a row and pulling it up or down reorders the list.
+            // Nothing is moved before the release, so an accidental pull of a few pixels can
+            // still be let go where it started. `Sense::click_and_drag` is what makes egui tell
+            // the two apart — it waits until the pointer has left the slop radius before it
+            // reports a drag, and until then a release stays a click.
+            //
+            // Which row egui picked up is noted down here rather than acted on: `App::drag_row` is read
+            // once for the whole pass (`in_flight` above), so answering it where it happens would leave
+            // this entry uncarried until the next pass — one pass in which a moving pointer has nowhere
+            // to move to.
+            let started_here = strip.drag_started_by(egui::PointerButton::Primary) && !carried;
+            if in_flight == Some(id) {
+                // Carrying a row says so with the tooltip — the grip drawn at the left edge
+                // below is only a hint, and the cursor already changed to a grabbing hand.
+                strip = strip.on_hover_text(lang.tip_drag_row());
+            }
+            // The row's content goes into a child ui pinned to that strip, so the frame is
+            // painted exactly on the click area and cannot shift the list. `new_child` gives us
+            // the child directly; its used rect is handed back to the list by `prepared.end`.
+            let mut prepared =
+                frame.begin(&mut ui.new_child(egui::UiBuilder::new().max_rect(strip_rect)));
+            // The content is pinned to the height above and centred in it, so the painted frame ends up
+            // exactly as tall as the click area no matter how tall its text turns out to be.
+            prepared.content_ui.set_min_height(content_height);
+            {
+                let ui = &mut prepared.content_ui;
+                ui.horizontal(|ui| {
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(11.0), egui::Sense::hover());
+                    let dot_rect = dot_rect.shrink(1.5);
+                    ui.painter().rect_filled(dot_rect, 5.5, color);
+                    // A dash in the line colour: reading the list, one immediately sees which
+                    // curve in the chart belongs to this target. The dash is as tall as the dot
+                    // so the two form one line instead of looking misaligned.
+                    let (line_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(16.0, 11.0), egui::Sense::hover());
+                    ui.painter().rect_filled(line_rect.shrink(4.5), 1.0, trace);
+                    // What the dash means: an automatic or a hand-picked line colour. The knob is
+                    // the same one as in the chart so both places mean the same thing.
+                    let knob = Rect::from_center_size(
+                        line_rect.center(),
+                        Vec2::splat(crate::theme::LEGEND_KNOB),
+                    );
+                    ui.put(knob, Label::new("").selectable(false))
+                        .on_hover_text(&trace_tip);
+                    // The dash belongs to the text: spacing first, then the label.
+                    ui.add_space(7.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.add(
+                            Label::new(RichText::new(label).strong().size(13.0)).selectable(false),
+                        );
+                        let age = if secs_ago < 0.0 {
+                            lang.not_probed_yet().to_string()
+                        } else {
+                            i18n::fill(
+                                lang.ago_fmt(),
+                                &[("n", (secs_ago.max(0.0) as i64).to_string())],
+                            )
+                        };
+                        ui.add(
+                            Label::new(RichText::new(format!("{host} · {age}")).weak().size(11.0))
+                                .selectable(false),
+                        );
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(
+                            Label::new(RichText::new(&txt).color(color).monospace().size(12.0))
+                                .selectable(false),
+                        );
+                    });
+                });
+            }
+            // Closes the frame: paints it over the strip and hands its area back to the list.
+            prepared.end(ui);
+            // The grip: two columns of dots at the left edge, shown on the hovered row and on
+            // the one in flight. Painted after `prepared.end`, which puts the frame's fill on
+            // top of everything drawn inside the child — so this is the only way to keep the
+            // hint visible. It sits in the frame's 7 px padding and senses nothing: a press on
+            // it is a press on the row, exactly as before.
+            if strip.hovered() || carried {
+                let grip = Rect::from_min_size(
+                    strip_rect.left_center() + Vec2::new(1.0, -4.5),
+                    Vec2::new(GRIP_W - 2.0, 9.0),
+                );
+                let tint = if carried {
+                    m.swatch(app.color_idx_of(&app.targets[idx]))
+                } else {
+                    m.text_dim()
+                };
+                for row in 0..3 {
+                    for col in 0..2 {
+                        let c =
+                            grip.min + Vec2::new(1.5 + col as f32 * 5.0, 1.5 + row as f32 * 3.0);
+                        ui.painter().circle_filled(c, 1.1, tint);
+                    }
                 }
             }
 
-            // Now apply the actions after the loop, when `app` is no longer borrowed.
-            if let Some(idx) = begin_edit_idx {
-                app.begin_edit(idx);
+            // The strip allocated above is the row's click area. It is stored on the app and used by
+            // `clicked_in_row` (and by the click test) on the next pass, so a click still lands on the row it
+            // was aimed at even though the frame paints over it.
+            //
+            // Recorded as a hole-aware slot in `order` rather than pushed, because a row whose entry is being edited
+            // draws no strip and must still count as a row: `clicked_in_row` and `row_of` number the rows by position
+            // in here, and both have to be counting the same list. See [`rows_prev_pass`], which reads these back on
+            // the next pass in exactly this order.
+            row_ids.push(id);
+            row_rects.push(Some(strip_rect));
+            row_heights.push(strip_rect.height());
+            // What egui says about this row's press, read here rather than where it is acted on: the live move
+            // happens after this pass has drawn every row (see `move_now` below), and every flag of a widget is only
+            // valid for the rect it was answered with. It is captured before anything in this pass moves.
+            if started_here {
+                // A press egui has decided is a pull rather than a click: the entry is in flight from here on,
+                // which is what lets the next pass follow the pointer with it.
+                app.drag_row = Some(id);
+            } else if let (Some(carried_id), Some(to)) = (carried_id, drop_now) {
+                // Held and moving: the entry follows the pointer, which is what makes the list shuffle under it.
+                // A point outside the list leaves the entry where it is, and so does a slot that already is its own —
+                // `slot_at` says both.
+                //
+                // Only on the row that carries the entry: egui reports the press on one widget, but while the
+                // button is held every row answers for its own rect — so a move asked of a neighbour would be a
+                // second move for one pointer step, and pulling one row down then letting go would land two
+                // places too far. `carried` is this row's own flag, read before any move in this pass, and it is
+                // only ever true for the one row that holds the entry — the id in flight is fixed for the whole
+                // pass, so a move asked of a neighbour could never be right.
+                if carried {
+                    move_now = Some((carried_id, to));
+                }
             }
-            if let Some(action) = edit_action {
-                action(app);
+            // While a row is carried, `strip.clicked()` never happens anyway — egui reports a
+            // release as a click only when the widget was not dragged — but the guard keeps the
+            // two ways of leaving a press apart even if that changes.
+            if !carried && app.drag_row.is_none() && (clicked_on == Some(id) || strip.clicked()) {
+                begin_edit_idx = Some(id);
             }
-            // Removing a target closes the editor first: it points at an index that disappears.
-            if let Some(idx) = remove_idx {
-                app.cancel_edit();
-                app.selected = idx;
-                app.remove_selected();
+        }
+
+        // The live move, applied only now that every row of this pass has been drawn — see `move_now`.
+        //
+        // Unless the pointer let go in this very pass. A release is answered below and is meant to be the last word of a
+        // gesture, so a follow asked for by the same pass would move the list *after* that answer had been measured — and
+        // because egui reports `drag_stopped_id()` on every pass after the one it saw the release in, such a stray move is
+        // still there when the drop has already put the entry where the hand left it. The visible result was an entry that
+        // jumped one place further than the pointer ever went.
+        if let Some((id, to)) = move_now {
+            if release.is_none() {
+                app.move_target(id, to);
             }
-            // The colour lives on the target, not in `AppOptions`, so `commit_edit` cannot hand it
-            // to the autosave. Flagging it here lets `left` write the state once the panel is done.
-            if color_changed {
-                app.color_dirty = true;
+        }
+
+        // Then the layout is published, and it is published in the order of the list *after* that move — which is what the
+        // next pass's rows will be drawn in. The loop above recorded these lists in the order this pass drew them, and once a
+        // live move has shuffled the entries those two orders are no longer the same thing: pairing a rect with an entry by
+        // position would then hand every row another row's geometry, and a pointer aimed at one row would be read as a place
+        // on another. Reordering here is what keeps `App::row_rects[row]` meaning "the rect of `App::targets[row]`", which is
+        // the only contract the click test, [`rows_prev_pass`] and the tests can rely on. A row this pass drew no strip for —
+        // an open editor's form — travels with its own hole, so a list that has been dragged about still answers "no rect" for
+        // exactly the entry it has no rect for.
+        let mut placed: Vec<Option<Rect>> = vec![None; app.targets.len()];
+        for (id, rect) in row_ids.into_iter().zip(row_rects) {
+            if let Some(idx) = app.targets.iter().position(|t| t.id == id) {
+                placed[idx] = rect;
             }
-            app.row_rects = row_rects;
-            app.row_heights = row_heights;
-        });
+        }
+        // Rows the list has that this pass never drew at all — one below a scrollbar's edge, or added between passes. They
+        // keep their previous rect rather than becoming holes: a row can leave the screen on a scroll and come back, and an
+        // entry nobody ever drew is not the same as an editor's form (see `editing_here` in the loop above), so guessing from
+        // its neighbour would be a guess about a place the pointer may well mean.
+        for (idx, slot) in placed.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = match (app.row_ids.get(idx), app.row_rects.get(idx)) {
+                    (Some(id), Some(rect)) if app.targets.get(idx).is_some_and(|t| t.id == *id) => {
+                        *rect
+                    }
+                    _ => None,
+                };
+            }
+        }
+        app.row_ids = app.targets.iter().map(|t| t.id).collect();
+        app.row_rects = placed;
+        app.row_heights = app
+            .row_rects
+            .iter()
+            .map(|rect| rect.map_or(0.0, |r| r.height()))
+            .collect();
+
+        // The release, decided here rather than in the loop above: it names a place on screen and an entry, and neither can
+        // be trusted to a row — while the hand travelled, every pass shuffled the list under the pointer, so the row that
+        // carries the entry now is not necessarily the one that held it when the button came up. `rows` is what it is
+        // measured against: the layout as this pass found it, which is where the release happened and which no move of this
+        // pass can rewrite. Note that this runs *before* the live move below, so both halves see one numbering.
+        //
+        // A slot that names no move — because the point is outside the rows or already is the entry's own place — only lets
+        // go of the entry, which is what makes "dropped nowhere in particular" mean "stay where you got to".
+        if let Some(release) = release {
+            match release_slot(app, &rows, &release) {
+                Some(to) => {
+                    app.drop_moved_target(release.target.expect("only set for our rows"), to)
+                }
+                None => {
+                    app.drag_row = None;
+                    // The order may well have changed on an earlier pass of the same drag, and this is the only moment that
+                    // knows the gesture is over.
+                    app.save_now();
+                }
+            }
+        }
+
+        // Now apply the actions after the loop, when `app` is no longer borrowed. Checked before the
+        // edit actions so a drop can never be followed by an editor opening on a stale index.
+        if let Some(id) = begin_edit_idx {
+            app.begin_edit_by_id(id);
+        }
+        if let Some(action) = edit_action {
+            action(app);
+        }
+        // Removing a target closes the editor first: it points at an index that disappears.
+        if let Some(id) = remove_idx {
+            app.cancel_edit();
+            app.selected_by_id(id);
+            app.remove_target_by_id(id);
+        }
+        // The colour lives on the target, not in `AppOptions`, so `commit_edit` cannot hand it
+        // to the autosave. Flagging it here lets `left` write the state once the panel is done.
+        if color_changed {
+            app.color_dirty = true;
+        }
+    });
 
     app.stats_scratch = scratch;
 }

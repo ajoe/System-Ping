@@ -550,6 +550,15 @@ macro_rules! texts {
     (de tip_remove_fmt) => { "{label} entfernen" };
     (en tip_remove_fmt) => { "Remove {label}" };
 
+    // ---- dragging a row in the target list to another place ----
+    // The handle says "hold and pull" without covering the row's own text, so it is a short glyph
+    // plus one tooltip; the messages only appear after a release, where the user wants to know
+    // whether anything moved.
+    (de tip_drag_row) => { "Festhalten und nach oben oder unten ziehen: ändert die Reihenfolge" };
+    (en tip_drag_row) => { "Hold and drag up or down: changes the order of the list" };
+    (de msg_moved_fmt) => { "{label} ist jetzt Position {n} in der Liste" };
+    (en msg_moved_fmt) => { "{label} is now position {n} in the list" };
+
     // ---- fallback for an unknown name (never used; keeps the macro forgiving) ----
     (de _) => { "" };
     (en _) => { "" };
@@ -694,6 +703,8 @@ impl Lang {
         cancel_btn,
         values_span_fmt,
         tip_remove_fmt,
+        tip_drag_row,
+        msg_moved_fmt,
         horizon_hint_chart,
         samples_capacity_fmt,
         suggestions,
@@ -784,7 +795,7 @@ mod tests {
 
     /// The texts a visible control can show. A text that is empty in one language would silently
     /// render as a blank button, so this test is the guard for both columns of the table.
-    const CONTROLS: [fn(&Lang) -> &'static str; 23] = [
+    const CONTROLS: [fn(&Lang) -> &'static str; 25] = [
         Lang::subtitle,
         Lang::data_folder_btn,
         Lang::stop_all,
@@ -808,6 +819,10 @@ mod tests {
         Lang::export_csv,
         Lang::add_btn,
         Lang::app_title,
+        // The drag handle's tooltip and the answer after a release: both are shown right next
+        // to the row, so an empty text would look like a glitch rather than a missing translation.
+        Lang::tip_drag_row,
+        Lang::msg_moved_fmt,
     ];
 
     #[test]
@@ -831,6 +846,12 @@ mod tests {
     fn fill_replaces_every_placeholder() {
         let s = fill("{a} und {b}", &[("a", "1".into()), ("b", "2".into())]);
         assert_eq!(s, "1 und 2");
+        // The one text that names the new place of a moved row: both placeholders have to be there.
+        let s = fill(
+            Lang::En.msg_moved_fmt(),
+            &[("label", "DNS".into()), ("n", "3".into())],
+        );
+        assert_eq!(s, "DNS is now position 3 in the list");
     }
 
     #[test]

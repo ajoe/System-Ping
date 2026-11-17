@@ -316,6 +316,11 @@ fn main() -> eframe::Result<()> {
                 app::set_language_silently(&mut a, lang);
                 // Paint the chosen look before the first frame is drawn.
                 system_ping::theme::apply(&cc.egui_ctx, a.theme_mode);
+                // `DRAG_WATCH` prints what egui sees while a person drags a row in the real window: the same gesture the
+                // tests drive headless, but with input that comes through the OS instead of a synthetic pointer.
+                if std::env::var_os("DRAG_WATCH").is_some() {
+                    return Ok(Box::new(system_ping::screenshot::DragSelfTest::new(a, cc)));
+                }
                 match collect {
                     Some(secs) => Ok(Box::new(system_ping::screenshot::SelfTest::new(
                         a, cc, secs, limit,

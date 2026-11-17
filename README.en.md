@@ -34,7 +34,7 @@ macOS only needs the command line tools (`xcode-select --install`). On Windows,
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 82 tests (32 unit + 50 integration, no GUI)
+cargo test                   # 92 tests (32 unit + 60 integration, no GUI)
 cargo clippy --all-targets   # clean
 ```
 
@@ -152,6 +152,16 @@ stored as a palette number and survives a restart; a target that was chosen by h
 colour back to the automatic ones. When there are more targets than colours, colours are reused.
 The small disc in front of the name is unaffected — it still shows the state
 (green/yellow/orange/red).
+
+**Your own order:** grab a row in the left list and hold it (left click, keep the button down),
+then drag it up or down. The list rearranges itself under the pointer straight away, the dragged
+row is drawn faded, the cursor shows the grabbing hand, and a grip of six dots on the left edge
+marks the row. Letting go decides the final place — above another row's middle you land in front
+of it, below its middle behind it, and in the gap between two rows exactly at that boundary. The
+order is the one written to the state file, so it survives a restart. A target whose editor is
+open cannot be dragged: the form has priority, and a drop onto it is deliberately refused — other-
+wise it would hit one of the form's fields. A click released after a drag does not count as a
+click on the row, so dragging never opens an editor by accident.
 
 ## Language: one table, two languages
 
@@ -295,6 +305,15 @@ The counter “saved N s ago” says when the state file was last written (autos
 separate “Save” button would be a third way for something that happens automatically anyway.
 `Runtime` switches to `H:MM:SS` from one hour on. The **“CSV”** button exports straight into the
 state folder and opens it; “⌂ Data” in the header does nothing else than show that folder window.
+
+Two kinds of sentences share this one line: what a click reported (“3 → 1” after a move, “target
+saved”, which path an export is writing) and what announced itself (a measurement, a protocol file
+that can no longer be written, the autostart answer from the registry). Whatever the user did last
+wins — and stays winning, not just for one frame. The automatic warning is not thrown away in the
+process: it comes back as soon as nothing newer is in the way, because it is still true; a protocol
+file that gets retried every 30 s must not be allowed to bury an action for half a minute. The
+reason this needed a rule at all: while nothing was being measured the bar kept its previous text,
+so a click with measuring stopped looked like no click at all. `app/tests/fixes.rs` checks this.
 
 ## State and files
 

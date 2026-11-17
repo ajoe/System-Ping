@@ -2,18 +2,36 @@
 // address, category and the measuring switch, and nothing may move the list while a row is open.
 
 use system_ping::app::{App, AppOptions, TargetKind};
+use system_ping::i18n;
 
 fn app_with(targets: Vec<(&str, &str)>) -> App {
-    let mut app = App::with_theme_override(AppOptions::default(), Vec::new(), None);
-    // The default list comes from the machine's gateway; start from a known set instead.
-    app.targets.clear();
-    for (label, host) in targets {
-        app.new_label = label.to_string();
-        app.new_host = host.to_string();
-        app.add_target();
-    }
+    let mut app = app_live(targets);
+    // Several tests below read the status bar as their own evidence and must start from a line nobody wrote.
     app.status_msg.clear();
     app
+}
+
+/// The same list, but measuring — which is what a window does from its first frame on, and what a row's "new" marker asks for.
+/// A test that draws rows or checks that status line needs one of the two; the quiet variant above is for the ones that only
+/// read it, so no sentence from a start nobody pressed is in it.
+fn app_live(targets: Vec<(&str, &str)>) -> App {
+    let mut app = App::with_theme_override(AppOptions::default(), Vec::new(), None);
+    // An app that finds nothing saved does not start empty — it starts with the built-in three (gateway, DNS, internet), just as
+    // on a real first run, so `Vec::new()` above only says "nothing was saved". `set_test_targets` clears that list and adds
+    // exactly what the test asked for; without it a list named A/B/C would really be five rows long and every index below would
+    // count against something else than it names.
+    app.set_test_targets(&targets);
+    // Quietly: `start` announces itself in the status bar, and that line is evidence, not decoration, in the tests below.
+    app.start_quiet(true);
+    app
+}
+
+/// Puts the message from the last action into the status bar, where it only arrives at the end of a `tick`, and returns what the
+/// bar shows now. Every assertion on that line goes through here — reading `status_msg` straight after an action would see the
+/// previous one.
+fn said(app: &mut App) -> String {
+    app.tick(app.engine.elapsed_secs());
+    app.status_msg.clone()
 }
 
 /// A click on a row selects it and opens the editor right away.
@@ -52,7 +70,8 @@ fn renaming_a_target_keeps_its_history() {
     assert_eq!(app.targets[0].id, id, "the target stays the same");
     assert_eq!(app.targets[0].series.len(), 1, "the series is kept");
     assert_eq!(app.edit_idx, None);
-    assert!(app.status_msg.contains("neu"), "{}", app.status_msg);
+    let said = said(&mut app);
+    assert!(said.contains("neu"), "{said}");
 }
 
 /// Changing the address has to stop the running probes and reset the status.
@@ -89,7 +108,8 @@ fn an_empty_host_is_refused() {
 
     assert_eq!(app.targets[0].host, "127.0.0.1");
     assert_eq!(app.targets[0].label, "A", "the name stays unchanged too");
-    assert!(app.status_msg.contains("verworfen"), "{}", app.status_msg);
+    let said = said(&mut app);
+    assert!(said.contains("verworfen"), "{said}");
     assert_eq!(app.edit_idx, None);
 }
 
@@ -135,11 +155,8 @@ fn measurement_can_be_switched_off_and_on() {
     // The status line and the list row speak the language of the app, so the test asks for their
     // texts instead of hard-coding German words.
     let lang = app.lang();
-    assert!(
-        app.status_msg.contains(&lang.paused().to_lowercase()),
-        "{}",
-        app.status_msg
-    );
+    let said = said(&mut app);
+    assert!(said.contains(&lang.paused().to_lowercase()), "{said}");
     assert_eq!(app.status_text(&app.targets[0]), lang.paused());
 
     app.begin_edit(0);
@@ -194,7 +211,8 @@ fn the_list_cannot_change_while_editing() {
     // The index still points at the same target.
     assert_eq!(app.edit_idx, Some(1));
     assert_eq!(app.targets[1].label, "B");
-    assert!(app.status_msg.contains("Bearbeitung"), "{}", app.status_msg);
+    let said = said(&mut app);
+    assert!(said.contains("Bearbeitung"), "{said}");
 
     // After closing, both work again.
     app.commit_edit();
@@ -239,4 +257,81 @@ fn the_editor_closes_before_its_target_is_removed() {
         "no editor points at a removed row anymore"
     );
     assert_eq!(app.targets.len(), 1);
+}
+
+/// Dragging a row to another place is the third way the list can change, so it follows the same rule
+/// as adding and removing: while an editor holds a target by index, the order stays where it is.
+#[test]
+fn a_moved_row_waits_for_the_editor_to_close() {
+    let mut app = app_with(vec![("A", "127.0.0.1"), ("B", "127.0.0.1")]);
+    app.begin_edit(0);
+
+    // The id of the second row, dropped to the front — what a drag onto the open row would ask for.
+    let b = app.targets[1].id;
+    app.move_target(b, 0);
+
+    assert_eq!(app.targets[0].label, "A", "the list is untouched");
+    assert_eq!(app.edit_idx, Some(0), "the editor keeps its target");
+    let said = said(&mut app);
+    assert!(said.contains("Bearbeitung"), "{said}");
+
+    // Closed, the same move works.
+    app.commit_edit();
+    app.move_target(b, 0);
+    assert_eq!(app.targets[0].label, "B");
+    assert_eq!(app.targets[1].label, "A");
+}
+
+/// A row dropped where it already was changes nothing and says nothing about it — an accidental pull has to be
+/// harmless, and a status bar that claims "nothing moved" on every shaky click is worse than silence.
+#[test]
+fn a_row_dropped_on_its_own_place_changes_nothing() {
+    // A list of three: with two entries every other place *is* the own place, so there would be nothing to compare against.
+    let mut app = app_with(vec![
+        ("A", "127.0.0.1"),
+        ("B", "127.0.0.1"),
+        ("C", "127.0.0.1"),
+    ]);
+    let a = app.targets[0].id;
+
+    // A real move first, so the line kept below is one that moved something and can be recognised as such. `to` counts the list
+    // with the entry still in it, so 3 is "at the very end".
+    app.move_target(a, 3);
+    assert_eq!(app.targets[2].label, "A", "and it really moved");
+    let line = said(&mut app);
+    assert_eq!(
+        line,
+        i18n::fill(
+            app.lang().msg_moved_fmt(),
+            &[("label", "A".into()), ("n", "3".into())]
+        ),
+        "a real move does say something"
+    );
+
+    // Now the own place of that last row, asked for three ways over. Index 2 is where it stands. Index 3 is one past it, which is
+    // what a pointer resting on the row above names once that row has moved down into the hole (see `ui::slot_at`). And 99 is
+    // what a pointer near the bottom edge of a short list asks for — clamped to "at the very end", which is where it already is.
+    // All three are how a live drag answers a hand that comes back or wobbles by half a row, and none of them may move anything.
+    for to in [2, 3, 99] {
+        app.move_target(a, to);
+        assert_eq!(app.targets[2].label, "A", "slot {to} moved nothing");
+        assert_eq!(
+            said(&mut app),
+            line,
+            "slot {to} is the own place, so it says nothing"
+        );
+    }
+
+    // And the same entry still has a real move left in it: asked for one slot up from the last row it goes to the middle, which
+    // is what proves the three slots above were read as "stay" and not as a broken move that never does anything.
+    app.move_target(a, 1);
+    assert_eq!(
+        app.targets[1].label, "A",
+        "a move up out of the last row happens"
+    );
+    assert_ne!(said(&mut app), line, "and is said out loud again");
+
+    // An unknown id cannot move anything, and the list stays exactly as the moves above left it.
+    app.move_target(usize::MAX, 0);
+    assert_eq!(app.targets[0].label, "B");
 }

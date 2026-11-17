@@ -9,12 +9,9 @@ use system_ping::app::{App, AppOptions, TargetKind};
 /// An app instance with known targets, independent of whatever the network happens to offer.
 fn app_with(targets: Vec<(&str, &str)>) -> App {
     let mut app = App::with_theme_override(AppOptions::default(), Vec::new(), None);
-    app.targets.clear();
-    for (label, host) in targets {
-        app.new_label = label.to_string();
-        app.new_host = host.to_string();
-        app.add_target();
-    }
+    // Nothing saved means the built-in three, not an empty list — see the same note in `editing.rs`. This puts exactly the asked
+    // for rows in the list.
+    app.set_test_targets(&targets);
     app.status_msg.clear();
     app
 }
