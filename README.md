@@ -46,7 +46,10 @@ rustup target add x86_64-apple-darwin x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --profile test --lib   # warntfrei
 ```
 
-Die Tests brauchen kein Internet: sie pingen `127.0.0.1` mit dem `ping` des Systems.
+Die Tests brauchen kein Internet: sie pingen `127.0.0.1` mit dem `ping` des Systems. Eine Maschine,
+die ICMP an das eigene Loopback verwirft (manche Firewalls, manche Build-Umgebungen), kann den
+einen Test nicht ausführen, der die Live-Schleife wirklich messen lässt — er sagt dann per
+Ausgabe Bescheid und überspringt sich.
 
 ### Plattformunterschiede
 

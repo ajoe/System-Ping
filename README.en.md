@@ -46,7 +46,9 @@ rustup target add x86_64-apple-darwin x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --profile test --lib   # no warnings
 ```
 
-The tests need no internet: they ping `127.0.0.1` with the system's own `ping`.
+The tests need no internet: they ping `127.0.0.1` with the system's own `ping`. A machine that
+drops ICMP to its own loopback (some firewalls, some build environments) cannot run the one test
+that lets the live loop actually measure — it says so in its output and skips itself.
 
 ### What differs per platform
 

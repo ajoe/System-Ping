@@ -523,6 +523,13 @@ fn collection_needs_no_gui_types() {
 /// chart empty forever, which is the bug this test exists to catch.
 #[test]
 fn window_frames_fill_the_charts() {
+    // The loop this drives measures with the system's `ping`, so it needs a host that answers.
+    // A machine that drops ICMP to its own loopback (some firewalls, some build environments)
+    // cannot run it at all — say so out loud instead of reporting a broken collection path.
+    if system_ping::ping::probe_blocking("127.0.0.1", 800).is_err() {
+        eprintln!("skipped: this machine does not answer a ping to 127.0.0.1");
+        return;
+    }
     let _dir = StateDir::new("frames");
     let mut app = system_ping::app::App::new(system_ping::app::AppOptions::default(), Vec::new());
     app.options.interval_secs = 1.0;
