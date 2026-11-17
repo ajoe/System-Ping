@@ -16,9 +16,18 @@ the choice is saved together with the other options.
 
 The [latest release](https://github.com/ajoe/System-Ping/releases/latest) has ready files for
 **macOS on Apple Silicon**: an `.app` bundle (double click, no terminal window) and the same
-program file for the command line. Both are ad-hoc signed rather than notarised by Apple — on the
-first start, confirm with a right click → Open. No Windows or Linux files are attached; build those
-on the target system from the source (`cd app && cargo build --release`).
+program file for the command line. Both are ad-hoc signed rather than notarised by Apple, so a file
+downloaded from the net carries the system's quarantine flag.
+
+Move the app to `/Applications` before the first start — launched from the Downloads folder, a
+quarantined app gets relocated to a random read-only place — and if the system refuses to open it,
+use right click → Open or `xattr -dr com.apple.quarantine /Applications/System-Ping.app`. The same
+applies to the bare binary from a browser download (`xattr -d com.apple.quarantine <file>`); files
+fetched with `curl` are unaffected. None of this touches data: bundle and bare binary both use
+`~/Library/Application Support/system-ping`.
+
+No Windows or Linux files are attached; build those on the target system from the source
+(`cd app && cargo build --release`).
 
 ## Building
 

@@ -17,9 +17,18 @@ unter „Sprache“ (oder einmalig per `--lang en`). Alle Texte kommen aus einer
 Die [aktuelle Version](https://github.com/ajoe/System-Ping/releases/latest) gibt es als fertige
 Datei für **macOS auf Apple Silicon**: ein `.app`-Bundle (Doppelklick, ohne Terminal-Fenster) und
 dieselbe Programmdatei für die Befehlszeile. Beides ist ad-hoc signiert, nicht von Apple
-notarisiert — beim ersten Start mit Sekundärklick → „Öffnen“ bestätigen. Windows- und
-Linux-Dateien werden nicht mitgeliefert; die entstehen auf dem jeweiligen System aus dem
-Quelltext (`cd app && cargo build --release`).
+notarisiert, und ein Download aus dem Netz bekommt deshalb das Quarantäne-Attest des Systems.
+
+Vor dem ersten Start die App nach `/Applications` verschieben — aus dem Download-Ordner heraus
+verlagert macOS eine quarantänebehaftete App sonst an einen zufälligen, schreibgeschützten Ort —
+und, falls macOS sie zurückweist, Sekundärklick → „Öffnen" oder
+`xattr -dr com.apple.quarantine /Applications/System-Ping.app`. Für die einzelne Programmdatei aus
+dem Browser gilt dasselbe (`xattr -d com.apple.quarantine <datei>`); mit `curl` geladene Dateien
+sind nicht betroffen. Zustände und Historie bleiben bei allem unangetastet: Bundle und
+Programmdatei benutzen `~/Library/Application Support/system-ping`.
+
+Windows- und Linux-Dateien werden nicht mitgeliefert; die entstehen auf dem jeweiligen System aus
+dem Quelltext (`cd app && cargo build --release`).
 
 ## Bauen
 
