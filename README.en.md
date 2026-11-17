@@ -12,6 +12,14 @@ The interface is bilingual: **German and English**, switchable in the settings u
 (or once per run with `--lang en`). Every text comes from a single table (`app/src/i18n.rs`) and
 the choice is saved together with the other options.
 
+## Download
+
+The [latest release](https://github.com/ajoe/System-Ping/releases/latest) has ready files for
+**macOS on Apple Silicon**: an `.app` bundle (double click, no terminal window) and the same
+program file for the command line. Both are ad-hoc signed rather than notarised by Apple — on the
+first start, confirm with a right click → Open. No Windows or Linux files are attached; build those
+on the target system from the source (`cd app && cargo build --release`).
+
 ## Building
 
 A normal Rust toolchain setup (`rustup`) is required — the MSVC build on Windows. On Linux, besides

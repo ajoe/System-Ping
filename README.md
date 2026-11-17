@@ -12,6 +12,15 @@ Die Oberfläche ist zweisprachig: **Deutsch und Englisch**, umschaltbar in den E
 unter „Sprache“ (oder einmalig per `--lang en`). Alle Texte kommen aus einer einzigen Tabelle
 (`app/src/i18n.rs`), die Wahl wird mit den übrigen Optionen gespeichert.
 
+## Herunterladen
+
+Die [aktuelle Version](https://github.com/ajoe/System-Ping/releases/latest) gibt es als fertige
+Datei für **macOS auf Apple Silicon**: ein `.app`-Bundle (Doppelklick, ohne Terminal-Fenster) und
+dieselbe Programmdatei für die Befehlszeile. Beides ist ad-hoc signiert, nicht von Apple
+notarisiert — beim ersten Start mit Sekundärklick → „Öffnen“ bestätigen. Windows- und
+Linux-Dateien werden nicht mitgeliefert; die entstehen auf dem jeweiligen System aus dem
+Quelltext (`cd app && cargo build --release`).
+
 ## Bauen
 
 Voraussetzung ist ein normales Rust-Toolchain-Setup (`rustup`). Auf Windows ist das der
