@@ -2,7 +2,9 @@
 //!
 //! eframe gives no public way to read back what it drew, so the frame is rasterised
 //! from egui's own draw list (`ClippedPrimitive`s): filled and stroked rectangles,
-//! lines and text galley pixels. No engine internals are touched.
+//! lines and text. Text is not drawn here — its shape is taken from the glyph atlas egui
+//! already built for the GPU, so a letter in the PNG has the same picture as in the window.
+//! No engine internals are touched.
 
 use crate::app::{App, LogKind, View};
 use crate::i18n;
@@ -12,7 +14,7 @@ use eframe::CreationContext;
 use egui::epaint::ClippedPrimitive;
 use egui::{Color32, Pos2, Rect, Vec2};
 use image::RgbaImage;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -541,30 +543,54 @@ impl eframe::App for DragSelfTest {
 /* ------------------------------------------------------------------ raster */
 
 /// Rasterises one tessellated frame into a PNG. `surface` is the window the picture stands in
-/// for; `cap` supplies the look, which is what the framebuffer has to start on.
-fn capture(
+/// for; `cap` supplies the look, which is what the framebuffer has to start on, and the glyph
+/// atlas the text is cut out of.
+pub fn capture(
     cap: &egui::Context,
     surface: Option<Rect>,
     shapes: &[ClippedPrimitive],
-    path: &PathBuf,
+    path: &Path,
 ) -> Result<(u32, u32), String> {
-    let size = surface
-        .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(1080.0, 700.0)))
-        .size();
+    let surface =
+        surface.unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(1080.0, 700.0)));
+    let size = surface.size();
     let w = size.x.max(64.0) as u32;
     let h = size.y.max(64.0) as u32;
+    // A draw list speaks screen coordinates: the window's top-left corner is where the window
+    // stands on the desktop. The picture is the window on its own, so that corner is moved to the
+    // origin — kept where it is, it leaves the desktop's empty space along two sides of the
+    // picture and cuts the window off along the other two.
+    let shift = -surface.min.to_vec2();
     // The framebuffer starts on the theme's background, not black: egui only tessellates
     // what a panel paints over its own fill, and a `CentralPanel` leaves the rest of the
     // window to the viewport clear colour, which this raster has to supply itself.
     let bg = cap.global_style().visuals.panel_fill; // the viewport clear colour: panels only paint their own rects
     let mut img = RgbaImage::from_pixel(w, h, image::Rgba([bg.r(), bg.g(), bg.b(), 255]));
+    // The glyph atlas, read once up front: `Context::fonts` needs the context for writing and
+    // no single texel below should be paid for with that lock.
+    let font = FontTex::grab(cap);
 
     for clipped in shapes {
         let mesh = match &clipped.primitive {
             egui::epaint::Primitive::Mesh(m) => m,
             _ => continue,
         };
-        paint_mesh(&mut img, mesh, clipped.clip_rect, w, h);
+        // Every mesh of this program is either text or a shape, and both come in on the font
+        // texture — a shape samples the atlas's guaranteed white pixel, which is what
+        // `WHITE_UV` points at. A mesh on any other texture has no picture here.
+        let tex = match mesh.texture_id {
+            egui::epaint::TextureId::Managed(0) => Some(&font),
+            _ => None,
+        };
+        paint_mesh(
+            &mut img,
+            mesh,
+            clipped.clip_rect.translate(shift),
+            w,
+            h,
+            tex,
+            shift,
+        );
     }
 
     if let Some(parent) = path.parent() {
@@ -575,34 +601,103 @@ fn capture(
     Ok((w, h))
 }
 
-fn paint_mesh(img: &mut RgbaImage, mesh: &egui::epaint::Mesh, clip: Rect, w: u32, h: u32) {
-    for tri in mesh.indices.as_chunks::<3>().0 {
-        let p = |i: usize| -> Pos2 {
-            let v = &mesh.vertices[tri[i] as usize];
-            egui::pos2(v.pos.x, v.pos.y)
-        };
-        let c = |i: usize| -> Color32 { mesh.vertices[tri[i] as usize].color };
-        fill_triangle(img, p(0), p(1), p(2), c(0), c(1), c(2), clip, w, h);
-    }
-}
-
-/// Barycentric fill of one glyph triangle. The ten arguments are deliberate: the caller
-/// already holds them split out of the mesh (three positions, three colours) plus the clip
-/// rect and image size, and bundling them into a struct would only move the cost to the
-/// caller without making the loop below any shorter.
-#[allow(clippy::too_many_arguments)]
-fn fill_triangle(
+fn paint_mesh(
     img: &mut RgbaImage,
-    a: Pos2,
-    b: Pos2,
-    c: Pos2,
-    ca: Color32,
-    cb: Color32,
-    cc: Color32,
+    mesh: &egui::epaint::Mesh,
     clip: Rect,
     w: u32,
     h: u32,
+    tex: Option<&FontTex>,
+    shift: Vec2,
 ) {
+    for tri in mesh.indices.as_chunks::<3>().0 {
+        let v = |i: usize| -> &egui::epaint::Vertex { &mesh.vertices[tri[i] as usize] };
+        fill_triangle(img, [v(0), v(1), v(2)], clip, w, h, tex, shift);
+    }
+}
+
+/// The glyph atlas in the form the raster wants it: texels held by hand, so reading one while
+/// pixels are written never needs the context.
+struct FontTex {
+    size: [usize; 2],
+    px: Vec<Color32>,
+}
+
+impl FontTex {
+    fn grab(ctx: &egui::Context) -> Self {
+        let img = ctx.fonts(|f| f.image());
+        Self {
+            size: img.size,
+            px: img.pixels,
+        }
+    }
+
+    /// The texels behind a texture coordinate, interpolated the way
+    /// [`egui::epaint::TextureAtlas::texture_options`] asks the GPU to: bilinear, and edge
+    /// texels repeated instead of wrapping around the atlas. A glyph's quad corners carry the
+    /// uv of that glyph's rect in the atlas, so a triangle reaching outside that rect reaches
+    /// past the glyph — clamping is what the GPU's clamp mode does there and keeps the
+    /// neighbour's picture out of it.
+    fn sample(&self, uv: Pos2) -> Color32 {
+        let [cw, ch] = self.size;
+        let u = uv.x.clamp(0.0, 1.0);
+        let v = uv.y.clamp(0.0, 1.0);
+        // Texel centres sit half a texel inside their corner, which is what the `- 0.5` is.
+        let x = (u * cw as f32 - 0.5).clamp(0.0, cw as f32 - 1.0);
+        let y = (v * ch as f32 - 0.5).clamp(0.0, ch as f32 - 1.0);
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let texel = |gx: usize, gy: usize| -> Color32 { self.px[gy * cw + gx] };
+        let (a, b) = (texel(x0, y0), texel(x1, y0));
+        let (c, d) = (texel(x0, y1), texel(x1, y1));
+        Color32::from_rgba_unmultiplied(
+            mix4(a.r(), b.r(), c.r(), d.r(), fx, fy),
+            mix4(a.g(), b.g(), c.g(), d.g(), fx, fy),
+            mix4(a.b(), b.b(), c.b(), d.b(), fx, fy),
+            mix4(a.a(), b.a(), c.a(), d.a(), fx, fy),
+        )
+    }
+}
+
+/// One channel of the bilinear mix of four texels, with `fx` and `fy` as the weights inside
+/// the cell they span.
+fn mix4(a: u8, b: u8, c: u8, d: u8, fx: f32, fy: f32) -> u8 {
+    let top = a as f32 + (b as f32 - a as f32) * fx;
+    let bot = c as f32 + (d as f32 - c as f32) * fx;
+    (top + (bot - top) * fy).round() as u8
+}
+
+/// Vertex colour times texture picture: the multiply a fragment shader does. The atlas keeps a
+/// glyph as white with the coverage in its alpha, so a letter takes its colour from the vertex
+/// and its shape from the picture; the prerasterised discs the atlas hands out for round dots
+/// work the same way, and colour glyphs carry their own colours for a white vertex to let
+/// through. An untextured shape's `WHITE_UV` lands on the atlas's white pixel and is unchanged.
+fn mul(a: Color32, b: Color32) -> Color32 {
+    // `+ 127` rounds the division: cut off instead, a half-lit pixel would come out a shade
+    // darker than the one next to it, which is a grain over the whole picture.
+    let m = |x: u8, y: u8| ((x as u32 * y as u32 + 127) / 255) as u8;
+    Color32::from_rgba_unmultiplied(
+        m(a.r(), b.r()),
+        m(a.g(), b.g()),
+        m(a.b(), b.b()),
+        m(a.a(), b.a()),
+    )
+}
+
+/// Barycentric fill of one triangle of the draw list, texture sample included. `shift` moves the
+/// triangle from the screen it was drawn on onto the picture.
+fn fill_triangle(
+    img: &mut RgbaImage,
+    v: [&egui::epaint::Vertex; 3],
+    clip: Rect,
+    w: u32,
+    h: u32,
+    tex: Option<&FontTex>,
+    shift: Vec2,
+) {
+    let (a, b, c) = (v[0].pos + shift, v[1].pos + shift, v[2].pos + shift);
+    let (ca, cb, cc) = (v[0].color, v[1].color, v[2].color);
     let lo_x = a.x.min(b.x).min(c.x).max(clip.min.x).max(0.0);
     let hi_x = a.x.max(b.x).max(c.x).min(clip.max.x).min(w as f32 - 1.0);
     let lo_y = a.y.min(b.y).min(c.y).max(clip.min.y).max(0.0);
@@ -631,23 +726,33 @@ fn fill_triangle(
             if w0 < -0.02 || w1 < -0.02 || w2 < -0.02 {
                 continue;
             }
-            let r = (w0 * ca.r() as f32 + w1 * cb.r() as f32 + w2 * cc.r() as f32) as u32;
-            let g = (w0 * ca.g() as f32 + w1 * cb.g() as f32 + w2 * cc.g() as f32) as u32;
-            let bl = (w0 * ca.b() as f32 + w1 * cb.b() as f32 + w2 * cc.b() as f32) as u32;
-            let al = (w0 * ca.a() as f32 + w1 * cb.a() as f32 + w2 * cc.a() as f32)
-                .clamp(0.0, 255.0) as u32;
-            if al == 0 {
+            // Rounding, not truncation: the weights sum to one only as well as floating point
+            // allows, so a solid colour often lands as 254.9999998 — truncated that is a pixel a
+            // shade too light, in a pattern as regular as the arithmetic that made it.
+            let r = (w0 * ca.r() as f32 + w1 * cb.r() as f32 + w2 * cc.r() as f32).round();
+            let g = (w0 * ca.g() as f32 + w1 * cb.g() as f32 + w2 * cc.g() as f32).round();
+            let bl = (w0 * ca.b() as f32 + w1 * cb.b() as f32 + w2 * cc.b() as f32).round();
+            let al = (w0 * ca.a() as f32 + w1 * cb.a() as f32 + w2 * cc.a() as f32).round();
+            let col = Color32::from_rgba_unmultiplied(
+                r.clamp(0.0, 255.0) as u8,
+                g.clamp(0.0, 255.0) as u8,
+                bl.clamp(0.0, 255.0) as u8,
+                al.clamp(0.0, 255.0) as u8,
+            );
+            let col = match tex {
+                Some(t) => mul(
+                    col,
+                    t.sample(egui::pos2(
+                        w0 * v[0].uv.x + w1 * v[1].uv.x + w2 * v[2].uv.x,
+                        w0 * v[0].uv.y + w1 * v[1].uv.y + w2 * v[2].uv.y,
+                    )),
+                ),
+                None => col,
+            };
+            if col.a() == 0 {
                 continue;
             }
-            blend(
-                img,
-                x as u32,
-                y as u32,
-                r.min(255) as u8,
-                g.min(255) as u8,
-                bl.min(255) as u8,
-                al as u8,
-            );
+            blend(img, x as u32, y as u32, col.r(), col.g(), col.b(), col.a());
         }
     }
 }
