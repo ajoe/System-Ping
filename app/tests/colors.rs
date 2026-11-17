@@ -1,23 +1,36 @@
 //! Per-target trace colours: automatic assignment, manual override, persistence.
+//!
+//! Every file path here is said out loud (`save_now_to`, `load_from`) instead of going through
+//! `SYSTEM_PING_STATE_DIR`. That variable belongs to the whole process, so a test that writes and
+//! reads back has no real claim on it: while one test was saving, a parallel test in the same
+//! binary could point it at its own folder, and the read-back then found an empty list —
+//! `index out of bounds: the len is 0` on a machine that interleaves the tests differently than the
+//! one they were written on.
+
+use std::path::PathBuf;
 
 use system_ping::app::{App, AppOptions, AUTO_COLOR};
 use system_ping::theme;
 
-/// An app with the default targets and a fixed look, using its own state directory so nothing is
-/// read from or written to the user's real settings.
-fn new_app(tag: &str) -> App {
+/// The state folder of one test. Named after the test, and cleared first: a file left over from an
+/// earlier run would hold targets nobody wrote in this one, and the assertions below would compare
+/// against those.
+fn test_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("sp-colors-{tag}"));
-    // Left over from an earlier run of this test? Then the app would start with those targets
-    // instead of the default list, and the assertions below would compare against nothing.
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
-    std::env::set_var("SYSTEM_PING_STATE_DIR", &dir);
+    dir
+}
+
+/// An app with the built-in targets and a fixed look. Nothing is read from disk, so nothing here can
+/// reach a real user's settings either.
+fn new_app() -> App {
     App::with_theme_override(AppOptions::default(), Vec::new(), Some("dark"))
 }
 
 #[test]
 fn jedes_ziel_kriegt_eigene_farbe() {
-    let app = new_app("auto");
+    let app = new_app();
     assert!(
         app.targets.len() >= 3,
         "the test needs several targets in order to tell them apart"
@@ -45,7 +58,7 @@ fn jedes_ziel_kriegt_eigene_farbe() {
 
 #[test]
 fn manuelle_farbe_verdraengt_die_automatik() {
-    let mut app = new_app("manuell");
+    let mut app = new_app();
     // Target 0 gets a fixed colour; the automatic ones have to route around it.
     app.targets[0].color_idx = 1;
     let mut used = vec![app.color_idx_of(&app.targets[0])];
@@ -59,7 +72,7 @@ fn manuelle_farbe_verdraengt_die_automatik() {
 
 #[test]
 fn mehr_ziele_als_farben_wiederverwenden_die_palette() {
-    let mut app = new_app("overflow");
+    let mut app = new_app();
     // Beyond the palette size a colour has to be used twice; that must still be a valid entry and
     // must never leave a target without a line colour.
     while app.targets.len() <= theme::PALETTE_LEN + 2 {
@@ -78,12 +91,13 @@ fn mehr_ziele_als_farben_wiederverwenden_die_palette() {
 
 #[test]
 fn a_chosen_colour_survives_a_restart() {
-    let mut app = new_app("persist");
+    let dir = test_dir("persist");
+    let mut app = new_app();
     app.targets[1].color_idx = 5;
-    app.save_now();
+    app.save_now_to(&dir).unwrap();
 
     // What the state file holds is the palette number, not a colour.
-    let (options, saved) = system_ping::store::load();
+    let (options, saved) = system_ping::store::load_from(&dir);
     assert_eq!(saved[1].color_idx, 5);
     assert_eq!(saved[0].color_idx, AUTO_COLOR);
 
@@ -101,12 +115,10 @@ fn ein_altes_profil_ohne_farbe_bekommt_automatik() {
     // and that is the automatic colour. The way goes through the same file and the same loader the
     // app uses at start-up — an invented JSON would fail on every little detail,
     // which has nothing to do with colours.
-    let dir = std::env::temp_dir().join("sp-colors-alt");
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = test_dir("alt");
 
     // First a real state file, then the same file with the colour field taken out again.
-    let mut app = App::with_theme_override(AppOptions::default(), Vec::new(), Some("dark"));
+    let mut app = new_app();
     app.targets.truncate(1);
     app.save_now_to(&dir).unwrap();
     let path = system_ping::store::state_path_in(&dir);

@@ -37,7 +37,7 @@ jobs:
       version: ${{ steps.read.outputs.version }}
       tag: ${{ steps.pick.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: read
         run: echo "version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' app/Cargo.toml | head -1)" >>"$GITHUB_OUTPUT"
       - id: pick
@@ -58,10 +58,14 @@ jobs:
           - os: ubuntu-latest
             name: linux-x64
             target: x86_64-unknown-linux-gnu
-            # Same list as in the README's build section — eframe binds these directly.
+            # Same list as in the README's build section — eframe binds these directly — plus the
+            # run-time libraries the `--shot` below needs to paint on a machine with no desktop:
+            # winit stops without libxkbcommon-x11, and glow needs an EGL software renderer. Both
+            # are libraries, not headers, so the compile never notices them.
             apt: >-
               pkg-config libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxinerama-dev
-              libxrandr-dev libwayland-dev libxkbcommon-dev xvfb
+              libxrandr-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libgl1-mesa-dri
+              libegl1 libglx-mesa0 xvfb
           - os: windows-latest
             name: windows-x64
             target: x86_64-pc-windows-msvc
@@ -75,7 +79,7 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system libraries
         if: matrix.apt != ''
@@ -124,7 +128,10 @@ jobs:
         run: |
           v=${{ needs.version.outputs.version }}
           a=${{ matrix.name }}
-          cp README.en.md README.md
+          # The English readme is the one a Windows or Linux reader lands on, so it goes along —
+          # under the name `README.md`, which is what a plain unpack looks for. It lives one level
+          # above the crate the build runs in.
+          cp ../README.en.md README.md
           mkdir -p dist
           case "$a" in
             linux-x64)
@@ -149,7 +156,7 @@ jobs:
           (cd dist && $sum * | tr -s ' ' >SHA256SUMS-$a.txt)
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: assets-${{ matrix.name }}
           path: app/dist/*
@@ -159,18 +166,24 @@ jobs:
     needs: [version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: assets
           merge-multiple: true
 
-      # One checksum list for the whole release instead of one per system.
+      # One checksum list for the whole release instead of one per system. Every artefact arrives in
+      # its own folder named after the job that built it, and a release does not carry folders — so
+      # the files are pulled up to one level here. The check afterwards is the reason this is a step
+      # of its own: an empty out/ would otherwise sail through and leave a release with nothing but
+      # an empty checksum list on it.
       - name: Collect
         run: |
-          mkdir -p out && cp assets/* out/ 2>/dev/null || true
+          mkdir -p out
+          find assets -type f -exec cp {} out/ \;
           rm -f out/SHA256SUMS-*.txt out/SHA256SUMS.txt
+          test -n "$(ls -A out)" || { echo "no artefacts came from the build jobs" >&2; exit 1; }
           (cd out && shasum -a 256 * >SHA256SUMS.txt && ls -l && cat SHA256SUMS.txt)
 
       - name: Release

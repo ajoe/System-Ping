@@ -23,10 +23,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            # The system libraries eframe binds against, same list as in the README.
+            # The system libraries eframe binds against, same list as in the README — plus the two
+            # runtime packages that only show up when a window is actually painted: without
+            # libxkbcommon-x11 winit stops at "Library libxkbcommon-x11.so could not be loaded",
+            # which the compile and the headless tests never notice.
             apt: >-
               pkg-config libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxinerama-dev
-              libxrandr-dev libwayland-dev libxkbcommon-dev xvfb
+              libxrandr-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libgl1-mesa-dri
+              libegl1 libglx-mesa0 xvfb
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             apt: ""
@@ -36,7 +40,7 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system libraries
         if: matrix.apt != ''
@@ -81,7 +85,7 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: Swatinem/rust-cache@v2
         with:

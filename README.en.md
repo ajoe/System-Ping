@@ -40,8 +40,9 @@ and keeps its state folder next to itself.
 
 **Linux** is built on Ubuntu 24.04 against the system libraries (X11 and Wayland bindings load at
 run time, OpenGL through EGL/GLX). A desktop install has those; otherwise
-`sudo apt install libgl1 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2 libxkbcommon0`. There
-is no `.desktop` file and no AppImage: make it executable and run it.
+`sudo apt install libegl1 libgl1 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2
+libxkbcommon0 libxkbcommon-x11-0`. There is no `.desktop` file and no AppImage: make it executable
+and run it.
 
 None of this touches data: state and history stay in the system's state folder (see “State and
 files").

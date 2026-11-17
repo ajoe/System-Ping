@@ -39,9 +39,10 @@ geladene Dateien sind nicht betroffen.
 portabel, der Zustandsordner entsteht neben ihr.
 
 **Linux** ist auf Ubuntu 24.04 gegen die Systembibliotheken gebaut (X11- und Wayland-Bindungen werden
-zur Laufzeit geladen, OpenGL über EGL/GLX). Auf einem Desktop sind die da; sonst hilft
-`sudo apt install libgl1 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2 libxkbcommon0`. Eine
-`.desktop`-Datei oder ein AppImage gibt es nicht: ausführbar machen und starten.
+zur Laufzeit geladen, OpenGL über EGL/GLX). Auf einem Desktop sind die alle da; sonst hilft
+`sudo apt install libegl1 libgl1 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2
+libxkbcommon0 libxkbcommon-x11-0`. Eine `.desktop`-Datei oder ein AppImage gibt es nicht:
+ausführbar machen und starten.
 
 Zustände und Historie bleiben bei alledem unangetastet: Bundle und Programmdatei benutzen den
 Zustandsordner des Systems (siehe „Zustand und Dateien").
