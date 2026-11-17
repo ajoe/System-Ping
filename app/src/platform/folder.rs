@@ -43,13 +43,13 @@ fn spawn_for(dir: &Path) -> Option<std::process::Child> {
             cmds.push(("gio", vec!["open", s]));
         }
         for (exe, extra) in cmds {
-            if let Some(child) = std::process::Command::new(exe)
-                .args(extra)
-                .arg(dir)
-                .spawn()
-                .ok()
-            {
-                return Some(child);
+            match std::process::Command::new(exe).args(extra).arg(dir).spawn() {
+                // The first launcher that starts wins. Whether it actually brought a window here
+                // is a question nobody can answer from this side, so the child is all the caller
+                // gets either way.
+                Ok(child) => return Some(child),
+                // Not installed on this desktop: try the next one.
+                Err(_) => continue,
             }
         }
         None

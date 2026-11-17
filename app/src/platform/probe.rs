@@ -80,7 +80,7 @@ pub fn plan(exe: &str, host: &str, timeout_ms: u32) -> Plan {
     let args = {
         // `-c 1` is one request. `-W` is the wait for a reply, in whole seconds on Linux; rounding
         // up keeps a sub-second budget from turning into "wait for nothing".
-        let secs = ((timeout_ms as u64 + 999) / 1000).max(1).to_string();
+        let secs = (timeout_ms as u64).div_ceil(1000).max(1).to_string();
         vec![
             "-c".to_string(),
             "1".to_string(),

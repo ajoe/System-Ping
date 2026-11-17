@@ -146,9 +146,15 @@ fn a_click_on_a_row_opens_its_editor() {
     click_at(&ctx, &mut app, spot0, 3.0);
     assert_eq!(app.edit_idx, Some(0), "a click on row 0 switches back");
 
-    // The editor shows the right target.
+    // The editor shows the right target: the label is the built-in one, and the address is the
+    // address that target has. Not a literal address — the first built-in target is the machine's
+    // own gateway, and that is whatever its routing table says. On a build machine it is something
+    // like 10.1.0.1, so spelling out one home network would be a test that only passes at home.
     assert_eq!(app.edit_label, "Gateway");
-    assert_eq!(app.edit_host, "192.168.178.1");
+    assert_eq!(
+        app.edit_host, app.targets[0].host,
+        "the address field shows the clicked target's address"
+    );
 }
 
 #[test]
