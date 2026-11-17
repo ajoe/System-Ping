@@ -410,42 +410,110 @@ pub fn left(ctx: &egui::Context, app: &mut App) {
         });
 }
 
-/// Which of the rows built by [`left_body`] a plain left click belongs to, if any.
+/// Whether a press ended on one of the rows in this very pass, and which entry it was.
 ///
-/// A target row cannot use the ordinary `response.clicked()`: egui's `Frame::show` registers its
-/// area with `Sense::hover()` only (see `tests/frame_click.rs`), so a row never reports a click of
-/// its own. The decision therefore uses the rects the rows reported in the previous pass together
-/// with egui's own pointer state — the same two ingredients `clicked_elsewhere()` is built from,
-/// just without the per-area response that a hover-only frame never delivers.
+/// This is egui's own verdict on the question the whole gesture turns on: did the hand stay put, or did it
+/// travel? `InteractionSnapshot::clicked` names the widget a finished press belongs to, and egui only fills
+/// it in when the pointer stayed inside its slop (`InputOptions::max_click_dist`, six points by default) —
+/// so a pull of more than six points answers `None` here, without anyone having to measure the travel. That
+/// is why this reads an answer rather than computing one: an earlier version asked where the pointer was
+/// when it let go and tried to tell click from pull by distance, which cannot work — both end with the
+/// button released — and what it produced was the editor opening on whatever row the hand happened to be
+/// over at the end of a drag.
 ///
-/// Both the press and the release have to lie inside the row. Reading only the release position
-/// would be wrong: when a click opens an editor, the list relayouts and the very next pass already
-/// reports different rects, so the pointer of the click that opened it would be judged against
-/// geometry that did not exist when the mouse was pressed.
+/// It answers for one pass only, the pass whose events hold the release. The press before that has no answer
+/// yet, and after it egui has already forgotten the press; that is what [`App::drag_row`] is for.
+pub fn clicked_target(ctx: &egui::Context) -> Option<usize> {
+    // `interaction_snapshot` is read-only and describes this pass, computed in `begin_pass` from this pass's
+    // events — so unlike a widget's own `clicked()`, which reaches us one pass late, it is already true while
+    // the rows are being laid out. Anything that can be clicked in this window but is not a row (a button, a
+    // slider) answers `None` through [`strip_target`].
+    strip_target(ctx.interaction_snapshot(|i| i.clicked)?)
+}
+
+/// Whether egui has decided this pass that a held press on one of the rows is a pull, and which entry.
 ///
-/// `rects` are the row click areas from `App::row_rects`, so this only ever answers after a first layout pass —
-/// which is also true of a real click, since egui has to have drawn the rows before anyone can aim at them. A click
-/// on a control outside the list — a button, a combo box — lands in no row and returns `None`, which keeps those
-/// controls working normally.
+/// This is the other half of egui's verdict: `dragged_id` names the widget under a drag that has left the
+/// slop, and it is set in the same pass the pointer leaves it — one pass *earlier* than the row's own
+/// `drag_started()`, which is only handed out to a widget that already exists. So this is what lets the list
+/// start following the hand without a frame of lag, and what knows about the release pass itself (there egui
+/// has let go again, so it answers `None` — see [`App::drag_row`]).
+pub fn dragged_target(ctx: &egui::Context) -> Option<usize> {
+    strip_target(ctx.dragged_id()?)
+}
+
+/// Whether the hand that grabbed one of the rows is still holding it, and which entry egui says it is pulling.
 ///
-/// `rects` are the row click areas from [`App::target_row_rects`] — one per drawn row, without the id each one came
-/// from. The index this answers with counts *drawn* rows, so a caller cannot read it as an index into
-/// [`App::targets`]: an open editor draws no strip and is not counted here, while it does occupy a row of the list.
-/// [`App::row_target_of_undrawn_row`] turns the answer back into the entry it belongs to, which is what the caller acts on.
+/// The pair belongs together because a live follow has to answer both questions with one breath, and egui's answers about a drag are true for
+/// exactly one pass each. `ctx.dragged_id()` names the widget under a pull that has left the slop — but only until the pointer lets go: on the
+/// release pass itself egui has already let go again and answers `None` there, which is why [`App::drag_row`] carries the entry across that one
+/// pass. That is enough to know *what* is in flight, and on its own it is not enough to decide whether the list still follows the pointer: a
+/// release pass also has no button held, so asking only "is something carried?" makes it look like an ordinary hover — and answering that as a
+/// follow moves the entry one place past where the hand let go, undoing the drop that is measured from the very same point (see
+/// [`App::drop_moved_target`]). So the button has to be part of the question, which makes "still held" mean "not this pass's release".
+fn carried_by_drag(ctx: &egui::Context, app: &App) -> Option<usize> {
+    let dragged = ctx.dragged_id().and_then(strip_target);
+    // A press that has become a pull is what holds a row, and egui knows it from its own slop test (`is_decidedly_dragging`) rather than from
+    // anything here measuring travel. Asked on the same pass as `dragged_id()` because both come out of `begin_pass`, so they cannot disagree
+    // about which pass this is — a widget's own `drag_started()` would arrive one pass later and answer for a row that may already have moved.
+    let held = ctx.input(|i| i.pointer.is_decidedly_dragging());
+    match (dragged, held) {
+        // The normal case: egui says which row is pulled and the button says it still is.
+        (Some(id), true) => Some(id),
+        // The release pass, where egui has let go but our own drag has not — the entry is still in flight, only no longer followed. Named by
+        // `App::drag_row`, which is the one record that survives egui forgetting the press (see there).
+        (None, false) => app.drag_row,
+        // Nothing of ours is being pulled: either no row answers and whatever holds the button is a slider or a splitter somewhere else, or a row
+        // answers while the pointer is not on a pull at all — which egui only reports for one pass after a release that its slop test has not
+        // caught up with, and by then `App::drag_row` has been cleared by that drop.
+        _ => None,
+    }
+}
+
+/// Where the pointer is while it holds a row: the place every part of the gesture measures against.
 ///
-/// A press that turned into a drag is not a click: egui says so with `any_click()`, which only reports a release
-/// that stayed inside the click slop. That is what keeps dragging a row to another place from also opening its
-/// editor.
-pub fn clicked_in_row(ctx: &egui::Context, rects: &[Rect]) -> Option<usize> {
-    // Only a finished primary press+release counts; a drag of the panel border must not edit.
-    let pointer = ctx.input(|i| {
-        if i.pointer.any_click() {
-            i.pointer.interact_pos()
-        } else {
-            None
-        }
-    })?;
-    rects.iter().position(|rect| rect.contains(pointer))
+/// This is deliberately not `interact_pos()`. That one follows whichever widget egui thinks the pointer is *over*, and a live drag has been
+/// moving rows under the hand the whole time — so on the pass whose events hold the release it can still be standing on the row that came up to
+/// meet the entry, rather than where the hand actually is. Measured there, a drop asks for the place below the one the pointer rests on: every
+/// live move of such a drag then names that same slot, and the pass after each move names the entry's own place again — so the last move undoes
+/// the one before it and the release confirms where the wobble happened to stop rather than where the hand stopped. `latest_pos()` is the pointer
+/// itself, with nothing in between, which is what a place on screen has to be read from.
+fn drag_pos(ctx: &egui::Context) -> Option<Pos2> {
+    ctx.input(|i| i.pointer.latest_pos()).or_else(|| ctx.pointer_interact_pos())
+}
+
+/// Whether this pass is the one whose events hold the pointer letting go of a row, or the first one after it.
+///
+/// Both have to be answered together because egui's release answers span exactly those two passes: `drag_stopped_id()` names the entry that let
+/// go on the pass it saw the release event, and on every pass after that it keeps naming the same widget until another drag starts — while
+/// [`App::drag_row`] is cleared by the drop on the first of them. So "the release has been handled" is what tells the two apart, and a pass that
+/// is either of them must not move the list at all: the follow would shuffle the entries after the drop was measured from them.
+fn release_is_at_hand(app: &App, ctx: &egui::Context) -> bool {
+    app.drag_row.is_none() && ctx.drag_stopped_id().is_some_and(|id| strip_target(id).is_some())
+}
+
+/// What egui currently says about a press on one of the rows, as one line for a terminal.
+///
+/// This is [`clicked_target`], [`dragged_target`] and the release question printed side by side, which is how a drag that
+/// misbehaves tells you *which* of the three it is failing at: a pull whose `hit` never becomes `drag` never left egui's slop,
+/// one whose `stop` never appears was never let go of by egui, and one that lands in the wrong place has all three and a layout
+/// problem instead. Written as ids rather than labels because the watcher has no access to the list here, and `strip_target` is
+/// what turns an id back into an entry.
+pub fn gesture_report(ctx: &egui::Context) -> String {
+    let said = |id: Option<Id>| match id.and_then(strip_target) {
+        Some(target) => format!("#{target}"),
+        None => "-".to_string(),
+    };
+    let click = ctx.interaction_snapshot(|i| i.clicked);
+    let press = ctx.viewport(|v| v.hits.click.map(|w| w.id));
+    format!(
+        "hit={} drag={} start={} stop={} click={}",
+        said(press),
+        said(ctx.dragged_id()),
+        said(ctx.drag_started_id()),
+        said(ctx.drag_stopped_id()),
+        said(click),
+    )
 }
 
 /// Height of a row in the target list, in ui points: two lines of text plus the frame's padding.
@@ -491,12 +559,17 @@ struct DragRelease {
 /// Asks egui whether a pointer came to rest this pass, and if so where it did. See [`DragRelease`] for why the question has to
 /// be put at the top of a pass rather than where the answer is used.
 fn drag_release(ctx: &egui::Context) -> DragRelease {
-    // `drag_stopped_id` is egui's own note that a widget it had been dragging is no longer being dragged *this* pass — set
-    // from this pass's events, so unlike the row's `drag_stopped()` it does not arrive one pass late. Only our own rows can
-    // start a drag, so its id names the entry; [`strip_target`] turns it back into one.
+    // The entry that let go comes from egui's own note about it, and what matters here is that this is *not* the question
+    // [`clicked_target`] asks. `drag_stopped_id` names a widget egui had counted as dragged and now released, which is exactly
+    // the gesture we want to land — whereas a press that never left the slop answers there as "a click", and egui hands that one
+    // to the row's own `clicked()`, where it opens the editor instead. The two answers are mutually exclusive by construction:
+    // `interaction::interact` only reports a click when the pointer did *not* travel, so a finished pull can never be read as a
+    // click and vice versa. That is what lets one press have exactly one outcome without anyone comparing positions.
     DragRelease {
         target: ctx.drag_stopped_id().and_then(strip_target),
-        pos: ctx.pointer_interact_pos(),
+        // The same point the live follow measures by (see [`drag_pos`]) — one press cannot be answered against two different places, and the
+        // release is the one answer that has to agree with every move it just made.
+        pos: drag_pos(ctx),
     }
 }
 
@@ -506,7 +579,12 @@ fn drag_release(ctx: &egui::Context) -> DragRelease {
 /// widgets have to be recognised by recomputing their ids. A target id is a small number — handed out from 0
 /// upward, one above the highest in use, and never renumbered — so the range that could match is known ahead of
 /// time and no bookkeeping of our own is needed.
-fn strip_target(id: Id) -> Option<usize> {
+///
+/// This runs for every answer egui gives about a press, which is once per pass at worst, and it stops at the first hit — so the
+/// cost is bounded by how many targets there are, not by anything the user can do twice in quick succession. A test that drives
+/// the rows from outside the crate cannot recompute an id any other way, which is why this is public; nothing outside a row's own
+/// gesture should reach for it.
+pub fn strip_target(id: Id) -> Option<usize> {
     // Rows are only ever added between passes, never in the middle of one, and no user keeps thousands of
     // targets — so this bound is generous rather than tight, and a miss would cost at most one gesture.
     const ID_GUESS_LIMIT: usize = 4096;
@@ -524,6 +602,90 @@ fn strip_target(id: Id) -> Option<usize> {
 /// pointer for one pass, and a place nobody ever drew was never aimed at.
 fn rows_prev_pass(app: &App) -> Vec<Option<Rect>> {
     app.row_rects().to_vec()
+}
+
+/// A whole layout of the target list: which entry stood in which row, and where that row's click strip was drawn.
+///
+/// This is what a pass publishes, and the reason it has to be kept as one piece rather than as two lists is the question a drop asks: "which entry
+/// did the pointer come to rest on". That is only answerable in a layout — the numbering of rows and the numbering of the list agree or disagree
+/// depending on where the holes are, and reading an id from one list and a rect from another is how a drop came to name a row two places away from
+/// the pointer. See [`App::drag_layouts`], which keeps the last two of these for exactly that reason.
+#[derive(Clone)]
+pub struct RowLayout {
+    /// One entry per drawn row, in the order the panel drew them, with a `None` where an open editor drew a form instead of a strip.
+    pub rects: Vec<Option<Rect>>,
+    /// Which entry each of those rows showed, same length and order as [`Self::rects`].
+    pub ids: Vec<usize>,
+}
+
+/// The layouts this pass can measure a pointer against, oldest first: the one before last, then the one being drawn now.
+///
+/// A live follow always aims at what the hand can see, which is the layout of the pass before this one — that is [`rows_prev_pass`] and what
+/// [`live_slot`] measures by. A finished press is different: it began somewhere in a layout that may have been replaced twice over since, so
+/// answering it against only the newest one reads the pointer off rows it never travelled over. Both are needed at once, which is why this hands
+/// out a pair rather than picking one.
+fn layouts(app: &App) -> Vec<RowLayout> {
+    let mut out: Vec<RowLayout> = app
+        .drag_layouts
+        .iter()
+        .map(|l| RowLayout {
+            rects: l.rects.clone(),
+            ids: l.ids.clone(),
+        })
+        .collect();
+    out.push(RowLayout {
+        rects: rows_prev_pass(app),
+        ids: app.row_ids().to_vec(),
+    });
+    out
+}
+
+/// The place in a list that the pointer came to rest on, measured across every layout the gesture could have been aiming at.
+///
+/// Each layout answers with the row under the point and how far down it is — `row_at` already refuses a point that belongs to no row, so a layout
+/// that has moved out from under the pointer simply says nothing. The newest layout wins: while it can still answer, the rows there are the ones
+/// the hand has been looking at, and an older one would drag the answer back to a place the user stopped seeing passes ago. Only when none of
+/// them answers is the point outside the list, which both halves read as "stay".
+///
+/// This is what keeps a drop honest across a pass that redraws the whole list taller or shorter — closing an editor being the case that broke it
+/// first: the form's rows move back up into their places on the very pass that releases the drag, so the pointer rests in empty space as far as
+/// *that* layout is concerned while the layout it travelled over still knows exactly which row it meant.
+/// The same question asked of one layout, with the entry its rows show rather than only a place among them: `row_at` answers per slot, and whether
+/// that place is already where an entry stands is a question about *which* row it was. Looking the id up in this layout's own list is what keeps the
+/// two halves of a drag from answering it differently (see [`RowLayout`]).
+fn rest_on_row(layout: &RowLayout, pos: Pos2) -> Option<(usize, usize, Rect, Option<Rect>)> {
+    let (slot, rect, gap) = row_at(&layout.rects, pos)?;
+    let id = *layout.ids.get(slot)?;
+    Some((slot, id, rect, gap))
+}
+
+/// The place the pointer came to rest on, in whichever of them can still name a row under it. Kept for the live follow and for tests; a drop uses
+/// [`rest_in`], which pairs the row with the carried entry's place in the same layout.
+fn rest_on(layouts: &[RowLayout], pos: Pos2) -> Option<(usize, Rect, Option<Rect>)> {
+    layouts.iter().rev().find_map(|l| {
+        rest_on_row(l, pos).map(|(slot, _, rect, gap)| (slot, rect, gap))
+    })
+}
+
+/// The row the pointer came to rest on, told as a place in the list *of the layout it was measured in*, together with where the entry being carried
+/// stands in that very layout. That pairing is the whole answer a drop needs, and it cannot be taken from two layouts: a slot counted among one
+/// generation's rows and an entry's place counted among another's are numbers that do not speak about the same list — which is what let a drop name
+/// a row the pointer never passed. See [`rest_on`] for why the layout has to be found this way rather than read off the newest one.
+fn rest_in(layouts: &[RowLayout], carried: usize, pos: Pos2) -> Option<(usize, usize)> {
+    layouts.iter().rev().find_map(|l| {
+        let (slot, _, rect, gap) = rest_on_row(l, pos)?;
+        let from = l
+            .ids
+            .iter()
+            .position(|drawn| *drawn == carried)
+            // A layout that never drew the carried entry's row cannot say where it stood, and a slot counted in such a list would be a place in a
+            // layout the entry is not part of.
+            .filter(|row| l.rects.get(*row).is_some_and(|rect| rect.is_some()))?;
+        Some((
+            drop_index_for_row(slot, pos, rect, gap),
+            row_slot(&l.rects, from),
+        ))
+    })
 }
 
 /// How far the target list is scrolled right now, read back from where its rows were last drawn.
@@ -549,6 +711,18 @@ fn row_of(rows: &[Option<Rect>], app: &App, id: usize) -> Option<usize> {
         .iter()
         .position(|drawn| *drawn == id)
         .filter(|row| rows.get(*row).is_some_and(|rect| rect.is_some()))
+}
+
+/// The numbering [`row_at`] answers in, translated back into the order of [`App::targets`].
+///
+/// A row that was laid out but never drawn — an open editor's form, or one pushed past the panel's bottom edge by scrolling — keeps
+/// its `None` in `rows` so nothing below it shifts (see [`rows_prev_pass`]), and [`row_at`] counts those holes like any other row. A
+/// slot read off that numbering is therefore only a place in the list as long as no hole sits above it: with one open editor above,
+/// row 2 of the layout is entry 3 of the list, and handing 2 to [`App::move_target`] puts the carried entry one place too high. That
+/// is exactly what made an earlier version of this gesture land a drop short whenever an editor was open, and it is invisible for a
+/// plain list, where both numberings agree and every test that does not open a form passes either way.
+fn row_slot(rows: &[Option<Rect>], row: usize) -> usize {
+    rows.iter().take(row).filter(|rect| rect.is_none()).count() + row
 }
 
 /// The band a point is hit against for a row: the row's own click area plus whatever it takes for the rows of a
@@ -614,15 +788,21 @@ fn drop_index_for_row(target_row: usize, pos: Pos2, strip: Rect, gap: Option<Rec
     }
 }
 
-/// The row a point belongs to in the layout this pass is measuring against: which row it was and where that row's click strip
-/// stood. `None` when the point belongs to no row at all, which is what makes "let go outside the list" mean "stay".
+/// The row a point belongs to in the layout this pass is measuring against: which place in the list it was and where that row's
+/// click strip stood. `None` when the point belongs to no row at all, which is what makes "let go outside the list" mean "stay".
+///
+/// A hole counts as a row for the question of *which* strip the point sits on — the rows are laid out with the hole taking up its
+/// height, so that is where the pointer physically is. What it does not count as is a place in the list, and that is the whole
+/// difference between the two numbers this returns (see [`row_slot`]).
 ///
 /// The band below each row counts as its lower half: the empty line between two rows belongs to "after the upper one", and
 /// without it such a point would answer with whichever row it happened to be nearest to. See [`band`] for why the last row gets
 /// no band and what that means for a point under the list.
 ///
-/// The index counts `rows`, holes included (see [`rows_prev_pass`]), so it is the same numbering as [`App::targets`] — which is
-/// what lets an answer here be handed straight to [`App::move_target`] without saying anything about the layout it came from.
+/// The place is counted in the order of [`App::targets`], not in `rows`: holes are skipped on the way (see [`row_slot`]), so an answer
+/// here can be handed straight to [`App::move_target`] without saying anything about the layout it came from. That is the whole point of
+/// translating here rather than at the callers — both halves of the gesture ask this one function, so they cannot disagree about what a
+/// row number means while a form or a scrolled-away row sits somewhere in the list.
 fn row_at(rows: &[Option<Rect>], pos: Pos2) -> Option<(usize, Rect, Option<Rect>)> {
     let last = rows.iter().rposition(|rect| rect.is_some())?;
     rows.iter().enumerate().find_map(|(row, rect)| {
@@ -630,7 +810,7 @@ fn row_at(rows: &[Option<Rect>], pos: Pos2) -> Option<(usize, Rect, Option<Rect>
         let gap = below_gap(rect, row == last);
         band(rect, row == last)
             .contains(pos)
-            .then_some((row, rect, gap))
+            .then_some((row_slot(rows, row), rect, gap))
     })
 }
 
@@ -647,7 +827,7 @@ fn moves(from: usize, to: usize) -> bool {
 /// own current row asks "stay" the moment the pointer rests on it, so nothing wobbles between two passes. Measuring against a
 /// layout from further back would look tempting — it never changes — but it has been off the screen for every pass since, so a
 /// hand that moves faster than the list follows would be answered somewhere it stopped looking at long ago. The live follow only
-/// has to keep up with what the user can see.
+/// has to keep up with what the user can see, which is why this takes the newest layout alone rather than the pair a release gets.
 fn live_slot(app: &App, rows: &[Option<Rect>], carried: usize, pos: Pos2) -> Option<usize> {
     let from = row_of(rows, app, carried)?;
     let over = row_at(rows, pos)?;
@@ -657,28 +837,84 @@ fn live_slot(app: &App, rows: &[Option<Rect>], carried: usize, pos: Pos2) -> Opt
 /// The slot a release puts the carried entry in, or `None` when it asks for no move — which is what makes "let go outside the
 /// list" mean "stay".
 ///
-/// Both numbers are counted in one and the same layout: [`row_at`] says which row of it the pointer came to rest on, and
-/// [`row_of`] where the entry stood when this pass began. A live drag has been carrying the entry under the cursor all along, so
-/// those two agree whenever the hand moved by whole rows — and that is why this answer needs no correction for how far the
-/// pointer travelled: a drop measured from the entry's own row asks for nothing, and any other place says where it goes.
-fn release_slot(app: &App, rows: &[Option<Rect>], release: &DragRelease) -> Option<usize> {
-    let from = row_of(rows, app, release.target?)?;
-    // Below the last row there is nothing to aim at, and a point in that empty space must not be read as the nearest row's
-    // lower half — see [`band`], which refuses to grow the last row for the same reason. But "below the list" *is* a place a
-    // hand means: it is the end of the list, and naming it directly is what keeps a drop past the last row from landing one
-    // row short of it. No row can have been added or removed while the pointer was over them, so the end of the list is still
-    // exactly one place past the last of them.
-    let over = match row_at(rows, release.pos?) {
+/// Both numbers come from one and the same layout, found by [`rest_in`] as the newest one that still has a row under the pointer. That pairing is
+/// the fix for a drop that lands somewhere the pointer never went: a finished press began in an older layout than the pass releasing it draws, and
+/// if the list changed height in between — an editor closing and pulling every row under it back up being the case that broke first — the newest
+/// layout has no strip where the hand rests. Asked there, the point belongs to no row and the answer is "stay", so a drag that visibly travelled the
+/// whole list leaves the entry at the bottom. Asked in the layout the pointer really crossed, both its own place and the row it came to rest on are
+/// numbers about the same list, which is all [`slot_at`] needs. Where the layouts agree, which is every ordinary drop, this is exactly the old
+/// answer.
+fn release_slot(layouts: &[RowLayout], release: &DragRelease) -> Option<usize> {
+    let pos = release.pos?;
+    let carried = release.target?;
+    // The newest layout first, and only for the entry's own place: a live follow has been moving the list under the hand, so that is where it
+    // stands now. `rest_in` then searches backwards for a layout that can name both rows of the question, and while the newest one answers — which
+    // it does unless something changed height mid-gesture — its answer is used as is.
+    let over = match rest_in(layouts, carried, pos) {
         Some(over) => over,
-        None if release.pos?.y > rows.iter().flatten().last()?.max.y => {
-            (rows.len(), Rect::NOTHING, None)
+        None => {
+            // Below the last row there is nothing to aim at, and a point in that empty space must not be read as the nearest row's
+            // lower half — see [`band`], which refuses to grow the last row for the same reason. But "below the list" *is* a place a
+            // hand means: it is the end of the list, and naming it directly is what keeps a drop past the last row from landing one
+            // row short of it. No row can have been added or removed while the pointer was over them, so the end of the list is still
+            // exactly one place past the last of them. Asked per layout rather than once up front because an older layout can reach
+            // that answer while the newest one has nothing there at all — which is the point of asking every layout, not just the last.
+            // The `?` cannot be used in this closure, so the search is spelled out: no layout reaching that far down means the point
+            // is outside the list.
+            let under = layouts.iter().rev().find(|l| {
+                l.rects
+                    .iter()
+                    .flatten()
+                    .last()
+                    .is_some_and(|last| pos.y > last.max.y)
+            });
+            match under {
+                Some(under) => (
+                    row_slot(&under.rects, under.rects.len()),
+                    under.ids.iter().position(|drawn| *drawn == carried)?,
+                ),
+                None => return None,
+            }
         }
-        None => return None,
     };
-    slot_at(
-        drop_index_for_row(over.0, release.pos?, over.1, over.2),
-        from,
+    slot_at(over.0, over.1).inspect(|to| {
+        eprintln!(
+            "    RELEASE pos={} to={to} over=({}) layouts=[{}]",
+            fmt_pos(pos),
+            over.0,
+            over.1,
+            layouts
+                .iter()
+                .map(|l| format!(
+                    "[{}]",
+                    l.rects
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| format!(
+                            "#{i} {}:{} {}",
+                            l.ids.get(i).map_or("?".to_string(), |id| id.to_string()),
+                            r.map_or("-".to_string(), |r| fmt_rect(*r))
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+    })
+}
+
+/// A rect as one short word, for the traces that explain a drag.
+fn fmt_rect(rect: Rect) -> String {
+    format!(
+        "({:.0},{:.0})-({:.0},{:.0})",
+        rect.min.x, rect.min.y, rect.max.x, rect.max.y
     )
+}
+
+/// A point as one short word, for the traces that explain a drag.
+fn fmt_pos(pos: Pos2) -> String {
+    format!("({:.1}, {:.1})", pos.x, pos.y)
 }
 
 /// Turns a place the pointer named into a slot for [`App::move_target`], or `None` when it has nothing to say.
@@ -702,11 +938,10 @@ fn slot_at(to: usize, from: usize) -> Option<usize> {
 /// somewhere they control and click or drag a row with a synthetic pointer.
 pub fn left_body(ui: &mut Ui, app: &mut App) {
     let lang = app.lang();
-    // Which entry the current click landed on, decided once before the rows are built. The rects come from the previous
-    // pass; a real click always follows a pass that drew the rows. Resolved to an entry immediately: `clicked_in_row`
-    // counts drawn rows, and this loop is free to move entries through the list before it acts on the answer.
-    let clicked_on = clicked_in_row(ui.ctx(), &app.target_row_rects())
-        .and_then(|drawn| app.row_target_of_undrawn_row(drawn));
+    // Which entry the current click landed on, decided once before the rows are built. egui answers this (see
+    // [`clicked_target`]), so there is nothing to measure here — and in particular nothing that depends on where the
+    // pointer happened to be, which is what made an earlier version of this unable to tell a pull from a click.
+    let clicked_on = clicked_target(ui.ctx());
     // A click inside one of the editor's own controls (a text field, the combo box, a button) must
     // not be mistaken for "this row was clicked again", so that case is ignored here. The editor
     // only closes through its buttons, Enter/Esc, or a click on another row.
@@ -717,39 +952,66 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
     // Which entry is in flight, decided once for the whole pass. See the row loop below for why this
     // cannot be asked per row: the move at the end of this pass relocates the entry, and from that moment on
     // `app.drag_row` no longer matches the row that is being drawn — only its id still does.
-    let in_flight = app.drag_row;
-    // Which entry egui says it is dragging, asked of egui rather than read from `app.drag_row`. This is the answer that
-    // matters for a drop: egui only lets go of a widget in the very pass whose events hold the release, and that is the
-    // one pass in which the gesture can be measured (see [`DragRelease`]). `app.drag_row` lags behind it by one pass —
-    // it is set from `drag_started()`, which reaches a row late for the same reason `drag_stopped()` does.
-    let carried_id = ui.ctx().dragged_id().and_then(strip_target).or(in_flight);
-    // Where every row stood on the pass before this one — see [`rows_prev_pass`]. Taken here, at the very start of the pass:
-    // the live move below relocates rows once this pass has drawn them, and from that moment on `App::targets` describes a
-    // layout the pointer never saw. Both halves of the gesture measure against these same rows, so one cannot answer for a
-    // layout the other has already shuffled out from under it.
-    let rows = rows_prev_pass(app);
+    let carried_id = carried_by_drag(ui.ctx(), app);
+    // Whether the pointer let go of a row this pass or the one before it (see [`release_is_at_hand`]). Read here, next to the carry, because both
+    // halves of the gesture have to ask it at the same moment: a follow that fires on such a pass moves the list *after* the drop has been
+    // measured from it, which is how a drag ended up one place past the hand.
+    let release_at_hand = release_is_at_hand(app, ui.ctx());
+    // Whether this pass is the one in which egui picked a row up, and which one. Read here rather than per row: like every
+    // other answer in this block it comes from `begin_pass`, so it is true for the whole pass including the rows that have not
+    // been laid out yet, and a row that has already moved below us in this same loop cannot change it.
+    let grab_now = ui
+        .ctx()
+        .drag_started_id()
+        .and_then(strip_target)
+        .filter(|id| app.drag_row != Some(*id));
     // Before a single row of this pass is laid out: see [`drag_release`].
     let release = drag_release(ui.ctx());
+    // The layouts a pointer can be measured against, taken here at the very start of the pass, before the live move below relocates any row. Both
+    // halves of the gesture read these, so one cannot answer for a layout the other has already shuffled out from under it — and both get the same
+    // pair, which is what keeps them from disagreeing about what a row number means while an editor sits somewhere in the list (see [`layouts`]).
+    let layouts = layouts(app);
     // The slot a held drag asks for, computed here — before this pass lays out any row. Once the move has happened at the end
     // of the loop, this pass's own rows describe places the pointer never saw, so waiting for the loop to ask is too late.
-    let drop_now = match (carried_id, release.target) {
-        // A release is what ends a drag and decides where the entry finally lands, so on the pass that holds one the live
-        // follow keeps its hands off: the two halves must never both move the list for one gesture.
-        (Some(_), Some(_)) => None,
-        // Where the pointer is with the button still held: the entry follows it while it travels.
-        (Some(id), None) => ui
-            .input(|i| i.pointer.interact_pos())
-            .and_then(|pos| live_slot(app, &rows, id, pos)),
-        (None, _) => None,
+    let drop_now = match carried_id {
+        // Nothing of ours is in flight: nothing follows the pointer.
+        None => None,
+        // A release is what ends a drag and decides where the entry finally lands, so on the pass that holds one — and on the one right
+        // after it, where egui still names the same widget as "just released" (see [`release_is_at_hand`]) — the live follow keeps its hands
+        // off: the two halves must never both move the list for one gesture. This is not the same question as "is something carried", and
+        // conflating them was what made a drop land a row short of the hand: with the button up, the carry survives only in `App::drag_row`,
+        // so a follow that asks nothing else moves the entry to the slot below the one the release is about to name — and because every pass
+        // of such a drag does that, each move is undone by the next and the list ends wherever the wobble stopped rather than where the hand
+        // let go.
+        Some(_) if release_at_hand => None,
+        // The pass that only just picked the row up: egui has moved the pointer past the slop, but the hand has not travelled
+        // since then, so there is no new place to follow yet. Waiting one pass costs nothing and keeps the entry from being
+        // asked to move twice for a single step — once because it was picked up, once because the pointer moved.
+        Some(_) if grab_now.is_some() => None,
+        // Where the pointer is with the button still held: the entry follows it while it travels. Asked across both layouts rather than only the
+        // newest one, for exactly the reason a release is (see [`release_slot`]): the hand has been travelling over what it could see, and when the
+        // list changes height — an editor closing under a drag that cannot move while a form is open — the newest layout stops having any row where
+        // the pointer rests. Answered "stay" there, the entry never leaves its place for the whole rest of the gesture, and what a drop then reports
+        // is not where the hand stopped but wherever the last shuffle happened to leave it. Newest first keeps the ordinary case exactly as it was:
+        // while the current rows can answer, they are what the user is looking at and they decide.
+        Some(id) => drag_pos(ui.ctx()).and_then(|pos| {
+            layouts
+                .iter()
+                .rev()
+                .find_map(|l| live_slot(app, &l.rects, id, pos))
+        }),
     };
-    // A drag ends with the pointer released over a row, and egui reports that same release as a click
-    // on it — so while an entry is carried, a press+release on one of the rows cannot mean "open its
-    // editor": it was the pull that moved it. Checked against the rows themselves rather than through
-    // `clicked_row`, because egui's `interact_pos` still holds the position from *before* the release,
-    // which for a drop is the row the drag started on — and opening that editor would also refuse the
-    // move, since `App::move_target` waits for a form to be closed.
-    let released_a_drag = carried_id.is_some() && ui.input(|i| i.pointer.any_released());
-    let clicked_on = if released_a_drag { None } else { clicked_on };
+    // One press, one outcome. egui has already decided which of the two this was — a press that travelled answers as a drag and
+    // never as a click, one that stayed answers as a click and never as a drag (see [`clicked_target`] and [`dragged_target`]) —
+    // but the two answers arrive through different doors: the click from egui's verdict on this pass, the carry from egui's
+    // record plus `App::drag_row`, which lags a pass behind. So there is a window in which both are true, and an editor opening
+    // in it would also refuse the move, because `App::move_target` waits for a form to be closed. One of them has to lose, and
+    // it is the click: the hand did travel, and that is what a pull is.
+    let clicked_on = if carried_id.is_some() || grab_now.is_some() {
+        None
+    } else {
+        clicked_on
+    };
     let m = app.theme_mode;
     ui.horizontal(|ui| {
         ui.label(RichText::new(lang.targets()).strong());
@@ -776,7 +1038,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
     // remembered, which keeps the rows exactly where the pass that recorded them drew them. As soon as the hand opens, the
     // area is free again.
     let mut area = ScrollArea::vertical().auto_shrink([false, false]);
-    if in_flight.is_some() {
+    if carried_id.is_some() {
         if let Some(offset) = list_scroll_offset(app, ui) {
             area = area.vertical_scroll_offset(offset);
         }
@@ -815,7 +1077,12 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
         // `row_rects` — which reads as "the pointer is on nothing" for the rest of the drag, and as a target that has
         // vanished. One move per pass, applied once at the end, keeps this pass' geometry whole: the rows it drew are
         // exactly the rows the next pass measures against.
-        let mut move_now: Option<(usize, usize)> = None;
+        let move_now = match (grab_now, carried_id, drop_now) {
+            // The pass that picked the row up is not also the pass that moves it (see `drop_now`).
+            (Some(_), _, _) | (_, Some(_), None) => None,
+            (_, Some(id), Some(to)) => Some((id, to)),
+            (None, None, _) => None,
+        };
 
         // The list this pass draws, fixed before the first row is built: the ids, in the order they are to be drawn.
         // Walking indices instead would let a live move below reassign the loop mid-flight — `app.targets` is
@@ -837,7 +1104,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             // rest of the body never has to borrow `app.targets` again. The editor below needs
             // `app` mutably (its fields are the form's state), which a live borrow would forbid.
             //
-            // Everything that says "this row" is asked by id rather than by position, for the same reason `in_flight`
+            // Everything that says "this row" is asked by id rather than by position, for the same reason `carried_id`
             // is read once outside the loop: a drop below moves the entry through the list while this loop runs, and
             // from that moment on every index in the list — including this row's own — describes a different order
             // than the one being drawn.
@@ -895,7 +1162,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             // A row that is being carried is drawn faded and cannot be edited or grabbed again —
             // one drag at a time, and the ghost says which entry is in flight.
             let id = t.id;
-            let carried = in_flight == Some(id);
+            let carried = carried_id == Some(id);
             let strip_rect = match strip_rect {
                 Some(rect) => rect,
                 None => {
@@ -1186,7 +1453,7 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             // own press — hover, drag start, click — never for where anything is.
             let strip = strip_ui.interact(strip_rect, strip_id(id), egui::Sense::click_and_drag());
             ui.advance_cursor_after_rect(strip_rect);
-            let mut strip = strip.on_hover_cursor(if in_flight == Some(id) {
+            let mut strip = strip.on_hover_cursor(if carried_id == Some(id) {
                 CursorIcon::Grabbing
             } else {
                 CursorIcon::PointingHand
@@ -1194,19 +1461,24 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             if strip.hovered() {
                 frame.fill = m.row_fill(true);
             }
-            // The same press that opens the editor on a quick click becomes a drag as soon as
-            // the pointer travels: holding a row and pulling it up or down reorders the list.
-            // Nothing is moved before the release, so an accidental pull of a few pixels can
-            // still be let go where it started. `Sense::click_and_drag` is what makes egui tell
-            // the two apart — it waits until the pointer has left the slop radius before it
-            // reports a drag, and until then a release stays a click.
-            //
-            // Which row egui picked up is noted down here rather than acted on: `App::drag_row` is read
-            // once for the whole pass (`in_flight` above), so answering it where it happens would leave
-            // this entry uncarried until the next pass — one pass in which a moving pointer has nowhere
-            // to move to.
-            let started_here = strip.drag_started_by(egui::PointerButton::Primary) && !carried;
-            if in_flight == Some(id) {
+            // The same press that opens the editor on a quick click becomes a drag as soon as the
+            // pointer travels: holding a row and pulling it up or down reorders the list.
+            // `Sense::click_and_drag` is what makes egui tell the two apart, and how far the pointer has
+            // to travel before egui calls it a drag is not ours to choose — it is
+            // `InputOptions::max_click_dist`, 6 points by default, adjustable in egui's own debug
+            // options. That is deliberate: this app must not invent its own threshold and then disagree
+            // with the one egui reports the click with, because a row has to answer "click or pull" for
+            // one press exactly once. The slop is small enough that a real pull always leaves it, and a
+            // hand that stays inside it let go on purpose, which is a click.
+            if strip.drag_started_by(egui::PointerButton::Primary) {
+                // The entry egui has just decided is a pull goes into flight here, and nowhere else: `App::drag_row` is what
+                // keeps the carry alive on the passes after this one, where egui's own answer for a drag has already been read
+                // once at the top of the pass (`carried_id`) and cannot be asked again. Read from the row rather than from that
+                // top-of-pass answer because a flag is only ever true for the widget it was handed to — which is exactly what
+                // says *which* entry egui picked up, and the whole reason `App::drag_row` names an id and not a row.
+                app.drag_row = Some(id);
+            }
+            if carried_id == Some(id) {
                 // Carrying a row says so with the tooltip — the grip drawn at the left edge
                 // below is only a hint, and the cursor already changed to a grabbing hand.
                 strip = strip.on_hover_text(lang.tip_drag_row());
@@ -1295,56 +1567,36 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                 }
             }
 
-            // The strip allocated above is the row's click area. It is stored on the app and used by
-            // `clicked_in_row` (and by the click test) on the next pass, so a click still lands on the row it
-            // was aimed at even though the frame paints over it.
+            // The strip allocated above is the row's click area, and it is what egui matches a press against. It is recorded
+            // so the drag can answer "which row is the pointer standing in" (see [`rows_prev_pass`]) — the click itself no
+            // longer needs it, because egui names the widget a press belongs to.
             //
             // Recorded as a hole-aware slot in `order` rather than pushed, because a row whose entry is being edited
-            // draws no strip and must still count as a row: `clicked_in_row` and `row_of` number the rows by position
-            // in here, and both have to be counting the same list. See [`rows_prev_pass`], which reads these back on
-            // the next pass in exactly this order.
+            // draws no strip and must still count as a row: every consumer of `row_rects` numbers the rows by position,
+            // so they all have to be counting the same list. See [`rows_prev_pass], which reads these back on the next
+            // pass in exactly this order.
             row_ids.push(id);
             row_rects.push(Some(strip_rect));
             row_heights.push(strip_rect.height());
-            // What egui says about this row's press, read here rather than where it is acted on: the live move
-            // happens after this pass has drawn every row (see `move_now` below), and every flag of a widget is only
-            // valid for the rect it was answered with. It is captured before anything in this pass moves.
-            if started_here {
-                // A press egui has decided is a pull rather than a click: the entry is in flight from here on,
-                // which is what lets the next pass follow the pointer with it.
-                app.drag_row = Some(id);
-            } else if let (Some(carried_id), Some(to)) = (carried_id, drop_now) {
-                // Held and moving: the entry follows the pointer, which is what makes the list shuffle under it.
-                // A point outside the list leaves the entry where it is, and so does a slot that already is its own —
-                // `slot_at` says both.
-                //
-                // Only on the row that carries the entry: egui reports the press on one widget, but while the
-                // button is held every row answers for its own rect — so a move asked of a neighbour would be a
-                // second move for one pointer step, and pulling one row down then letting go would land two
-                // places too far. `carried` is this row's own flag, read before any move in this pass, and it is
-                // only ever true for the one row that holds the entry — the id in flight is fixed for the whole
-                // pass, so a move asked of a neighbour could never be right.
-                if carried {
-                    move_now = Some((carried_id, to));
-                }
-            }
-            // While a row is carried, `strip.clicked()` never happens anyway — egui reports a
-            // release as a click only when the widget was not dragged — but the guard keeps the
-            // two ways of leaving a press apart even if that changes.
-            if !carried && app.drag_row.is_none() && (clicked_on == Some(id) || strip.clicked()) {
+
+            // The editor opens only for a row that offers a strip, so this is written after the recording above rather than
+            // before it. A row whose entry is being edited draws a form instead of a strip and `continue`s earlier, which is what
+            // keeps egui's answer about a click inside that form from opening another form: `clicked_on` names whatever widget the
+            // press landed on, and only rows are ever able to answer it here.
+            if clicked_on == Some(id) {
                 begin_edit_idx = Some(id);
             }
         }
 
         // The live move, applied only now that every row of this pass has been drawn — see `move_now`.
         //
-        // Unless the pointer let go in this very pass. A release is answered below and is meant to be the last word of a
-        // gesture, so a follow asked for by the same pass would move the list *after* that answer had been measured — and
-        // because egui reports `drag_stopped_id()` on every pass after the one it saw the release in, such a stray move is
-        // still there when the drop has already put the entry where the hand left it. The visible result was an entry that
-        // jumped one place further than the pointer ever went.
+        // Unless the pointer let go in this very pass, or egui is still calling one of its widgets "just released" (see
+        // [`release_is_at_hand`]). A release is answered below and is meant to be the last word of a gesture, so a follow asked for by either of
+        // those passes would move the list *after* that answer had been measured — and because egui reports `drag_stopped_id()` on every pass
+        // after the one it saw the release in, such a stray move is still there when the drop has already put the entry where the hand left it.
+        // The visible result was an entry that jumped one place further than the pointer ever went.
         if let Some((id, to)) = move_now {
-            if release.is_none() {
+            if !release_at_hand {
                 app.move_target(id, to);
             }
         }
@@ -1377,6 +1629,21 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                 };
             }
         }
+        // Published as one piece, and kept for a pass longer than `row_rects`: a drop is measured against whichever of the last two layouts the
+        // pointer was really aimed at (see [`release_slot`]), and that question cannot be answered from two lists read separately — pairing an id
+        // from one generation with a rect from another is what let a drop name a row the pointer never passed.
+        //
+        // This pass's own layout, which means the rows as they will stand on the *next* pass: `placed` was reordered to the order after the live
+        // move above, so it is exactly what the panel draws next time and nothing has moved since. Pushed here rather than at the top of the pass
+        // because a release is decided below, in this very pass, and the layout the hand travelled over has to be among the two that get asked —
+        // which it is as soon as this one is the newest. The pass before it is the other.
+        app.drag_layouts.push(RowLayout {
+            rects: placed.clone(),
+            ids: app.targets.iter().map(|t| t.id).collect(),
+        });
+        if app.drag_layouts.len() > 2 {
+            app.drag_layouts.remove(0);
+        }
         app.row_ids = app.targets.iter().map(|t| t.id).collect();
         app.row_rects = placed;
         app.row_heights = app
@@ -1385,16 +1652,20 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             .map(|rect| rect.map_or(0.0, |r| r.height()))
             .collect();
 
-        // The release, decided here rather than in the loop above: it names a place on screen and an entry, and neither can
-        // be trusted to a row — while the hand travelled, every pass shuffled the list under the pointer, so the row that
-        // carries the entry now is not necessarily the one that held it when the button came up. `rows` is what it is
-        // measured against: the layout as this pass found it, which is where the release happened and which no move of this
-        // pass can rewrite. Note that this runs *before* the live move below, so both halves see one numbering.
+        // The release, decided here rather than in the loop above: it names a place on screen and an entry, and neither can be
+        // trusted to a row — while the hand travelled, every pass shuffled the list under the pointer, so the row that carries the
+        // entry now is not necessarily the one that held it when the button came up. It runs after the live move above so the two
+        // halves of one pass cannot both move: `move_now` already refuses to fire on a pass that saw the release, and here the list
+        // has had no move applied at all since the layouts were read, which is what keeps [`release_slot`]'s numbering valid.
         //
-        // A slot that names no move — because the point is outside the rows or already is the entry's own place — only lets
-        // go of the entry, which is what makes "dropped nowhere in particular" mean "stay where you got to".
+        // The pair of layouts is asked rather than just the newest one: this press began before the pass that published it, so on a pass that
+        // redrew the list — an editor closing, a live move — the pointer may be resting where no current row stands while the layout it travelled
+        // over still knows which row it meant.
+        //
+        // A slot that names no move — because the point is outside the rows or already is the entry's own place — only lets go of
+        // the entry, which is what makes "dropped nowhere in particular" mean "stay where you got to".
         if let Some(release) = release {
-            match release_slot(app, &rows, &release) {
+            match release_slot(&layouts, &release) {
                 Some(to) => {
                     app.drop_moved_target(release.target.expect("only set for our rows"), to)
                 }
@@ -1407,8 +1678,16 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
             }
         }
 
+        // Now apply the actions after the loop, when `app` is no longer borrowed. Checked before the edit actions so a drop can
+        // never be followed by an editor opening on a stale index. Note that this runs *after* the live move: a press that became
+        // a pull has already been denied its click (`clicked_on`), so there is nothing here left to reconcile — and if there were,
+        // the list it would be measured against is now the one the drag produced rather than the one the pointer travelled over.
+
         // Now apply the actions after the loop, when `app` is no longer borrowed. Checked before the
-        // edit actions so a drop can never be followed by an editor opening on a stale index.
+        // edit actions so a drop can never be followed by an editor opening on a stale index. Note that this runs *after* the
+        // live move and the drop above: a press that became a pull has already been denied its click (`clicked_on`), so there
+        // is nothing here left to reconcile — and if there were, the list it would be measured against is now the one the drag
+        // produced rather than the one the pointer travelled over.
         if let Some(id) = begin_edit_idx {
             app.begin_edit_by_id(id);
         }

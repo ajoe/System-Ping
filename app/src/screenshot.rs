@@ -425,6 +425,13 @@ impl eframe::App for DragSelfTest {
             .collect::<Vec<_>>();
         // Where egui believes the pointer is, and what our own layout says about that point. Both are printed because a
         // disagreement between them is precisely the bug being hunted: egui's hit test versus `App::row_rects`.
+        //
+        // The three answers from egui are the gesture's own decision points, so they are printed as egui gives them and not as
+        // our code later interprets them. `hit` is the widget a press belongs to — it names a row from the moment the button
+        // goes down, which is what keeps the editor off a press that turns into a pull. `drag` only appears once the pointer has
+        // left egui's slop, and `stop` marks the single pass in which a drop can be measured. A press that reads `hit=Some` then
+        // never `drag=` is a click; one that reads `drag=Some` then `stop=Some` is a pull, and the order printed on that same line
+        // is what the drop had to work from.
         let seen = ctx.input(|i| {
             (
                 i.pointer.hover_pos(),
@@ -434,17 +441,19 @@ impl eframe::App for DragSelfTest {
             )
         });
         let rows = self.app.target_row_rects();
+        let egui_says = crate::ui::gesture_report(ctx);
         match seen.0 {
             Some(pos) => {
                 let row = rows.iter().position(|r| r.contains(pos));
                 eprintln!(
-                    "DRAGWATCH ptr=[{:.0},{:.0}] delta=[{:.1},{:.1}] down={} row={:?} drag={:?} order={:?}",
+                    "DRAGWATCH ptr=[{:.0},{:.0}] delta=[{:.1},{:.1}] down={} row={:?} {} ours={:?} order={:?}",
                     pos.x,
                     pos.y,
                     seen.2.x,
                     seen.2.y,
                     seen.1,
                     row,
+                    egui_says,
                     self.app.drag_row,
                     order
                 );

@@ -628,6 +628,15 @@ pub struct App {
     /// it (see [`App::row_of`]). It is stored rather than read from `targets` because a pass can publish its layout while the
     /// list behind it has rows the panel never drew.
     pub row_ids: Vec<usize>,
+    /// The two last published layouts of the target list, oldest first — each one pairing a row's click strip with the entry it showed.
+    ///
+    /// A single layout is enough while a drag only has to follow the pointer, because the newest one is always what the hand can see. It stops
+    /// being enough at the moment the press ends: that press began in an older layout, and if the list was redrawn in between — by a live move, or
+    /// because an editor closed and pulled every row under it back up — the newest one no longer has a strip where the pointer came to rest. Keeping
+    /// the previous pass's as well is what lets [`ui::release_slot`] answer such a release for the layout the hand actually travelled over while
+    /// still counting the carried entry's own place in the current one. Two generations are all a gesture can reach: only one pass lies between
+    /// reading a pointer and moving the list it aimed at.
+    pub drag_layouts: Vec<crate::ui::RowLayout>,
     /// The row currently being dragged to another place in the list, as its id — not as an index,
     /// because the point of a drag is that indices change while it is happening. `ui::left_body`
     /// sets and clears it; [`App::drop_moved_target`] ends the drag on release.
@@ -946,6 +955,7 @@ impl App {
             row_rects: Vec::new(),
             row_heights: Vec::new(),
             row_ids: Vec::new(),
+            drag_layouts: Vec::new(),
             drag_row: None,
             window_geom: None,
             // Placeholder until the top bar has been drawn once, which happens before any key can
@@ -1516,23 +1526,12 @@ impl App {
         &self.row_rects
     }
 
-    /// The same click areas as a plain list of rects, with the holes left out: what `ui::clicked_in_row` aims a synthetic
-    /// pointer at. A point cannot land on a row that was not drawn, so skipping those is exactly right — but note that
-    /// this is *not* the numbering [`App::row_rects`] uses, and a caller that needs to say which row it means has to count
-    /// the same way the answer came back (see [`App::row_target_of_undrawn_row`]).
+    /// The same click areas as a plain list of rects, with the holes left out: what a pointer aimed at "the third row the panel
+    /// actually drew" wants. A point cannot land on a row that was not drawn, so skipping those is exactly right — but note that
+    /// this is *not* the numbering [`App::row_rects`] uses, and a caller that needs to say which entry it means has to ask
+    /// [`App::row_of`] with the id rather than counting here.
     pub fn target_row_rects(&self) -> Vec<egui::Rect> {
         self.row_rects.iter().flatten().copied().collect()
-    }
-
-    /// Turns a row counted by [`App::target_row_rects`] — which skips undrawn rows — back into the entry it belongs to.
-    /// `None` for a row that does not exist or was never drawn.
-    pub fn row_target_of_undrawn_row(&self, drawn_row: usize) -> Option<usize> {
-        self.row_ids
-            .iter()
-            .zip(self.row_rects())
-            .filter(|(_, rect)| rect.is_some())
-            .nth(drawn_row)
-            .map(|(id, _)| *id)
     }
 
     /// The entries whose rows the panel laid out its last pass, one for each row of [`App::row_rects`] — so the two describe one
@@ -2279,16 +2278,18 @@ impl App {
     /// pass, and one write per shuffle would be a disk access per frame. A finished gesture writes through
     /// [`Self::drop_moved_target`] instead, and so does every other way of reordering.
     pub fn move_target(&mut self, id: usize, to: usize) {
-        let Some(from) = self.targets.iter().position(|t| t.id == id) else {
-            return;
-        };
         // The editor keeps its target by index and the list is about to change. While a form is
         // open the order therefore stays as it is — same rule as `add_target` and
-        // `remove_selected` follow, and the drag handle simply does not appear on an open row.
+        // `remove_selected` follow, and the drag handle simply does not appear on an open row. Asked before the entry is looked up
+        // because the answer is the same whether or not such an entry exists: a form that is open means no reordering, and nothing
+        // about a particular id can change that.
         if self.edit_idx.is_some() {
             self.say(self.lang().msg_finish_edit_first().to_string());
             return;
         }
+        let Some(from) = self.targets.iter().position(|t| t.id == id) else {
+            return;
+        };
         // `to` counts the list with the carried entry still in it, which is what every caller measures by (see `ui::slot_at`).
         // That has two consequences this function has to honour.
         //
