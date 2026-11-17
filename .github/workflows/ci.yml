@@ -1,0 +1,97 @@
+# Gates for every push and pull request: formatting, lints, tests, and one build per operating
+# system. The three systems are here on purpose — everything platform specific lives in
+# app/src/platform/, and a check that only ever runs on one of them cannot tell whether a change
+# to that folder kept the other two working.
+#
+# The release artefacts themselves are built by release.yml, which is what runs on a tag.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Windows and Linux build and test the whole workspace, including the headless gui tests.
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            # The system libraries eframe binds against, same list as in the README.
+            apt: >-
+              pkg-config libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxinerama-dev
+              libxrandr-dev libwayland-dev libxkbcommon-dev xvfb
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            apt: ""
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --no-fail-fast
+
+      # The same smoke test the release job uses: `--shot` paints one frame and writes a PNG, so
+      # this proves the binary loads, opens a window and renders — not just that it compiles.
+      # Linux needs a display for that, hence xvfb-run. The explicit target is the one the release
+      # artefacts are built for, so CI covers that triple and not just whatever the runner is.
+      - name: Smoke test (paint one frame)
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
+          bin=target/${{ matrix.target }}/release/system-ping
+          [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a "$bin" --shot smoke.png chart
+          else
+            "$bin" --shot smoke.png chart
+          fi
+          test -s smoke.png
+
+  # macOS: the cheap gates only. The integration tests that drive a real window are covered here
+  # by the release job and by development machines; a headless CI runner has no window server
+  # session to attach to, and pretending otherwise would just make the run red for no reason.
+  macos-checks:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --lib

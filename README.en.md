@@ -14,20 +14,37 @@ the choice is saved together with the other options.
 
 ## Download
 
-The [latest release](https://github.com/ajoe/System-Ping/releases/latest) has ready files for
-**macOS on Apple Silicon**: an `.app` bundle (double click, no terminal window) and the same
-program file for the command line. Both are ad-hoc signed rather than notarised by Apple, so a file
-downloaded from the net carries the system's quarantine flag.
+The [latest release](https://github.com/ajoe/System-Ping/releases/latest) has a ready file for each
+of the three systems. GitHub Actions builds them — one runner per operating system, since a program
+file for one system cannot be produced on another — for every tag: `v0.9.1` gives the files below
+(`.github/workflows/release.yml`).
 
-Move the app to `/Applications` before the first start — launched from the Downloads folder, a
-quarantined app gets relocated to a random read-only place — and if the system refuses to open it,
-use right click → Open or `xattr -dr com.apple.quarantine /Applications/System-Ping.app`. The same
-applies to the bare binary from a browser download (`xattr -d com.apple.quarantine <file>`); files
-fetched with `curl` are unaffected. None of this touches data: bundle and bare binary both use
-`~/Library/Application Support/system-ping`.
+| File | |
+| --- | --- |
+| `System-Ping-<version>-macos-arm64.zip` | `System-Ping.app` for Apple Silicon: double click, no terminal window |
+| `system-ping-<version>-macos-arm64.tar.gz` | the same program file without a bundle, for the command line (`--help`) |
+| `System-Ping-<version>-windows-x64.zip` | `System-Ping.exe` (file icon and version info inside the file) and `icon.ico` |
+| `system-ping-<version>-linux-x64.tar.gz` | the program file for the command line (x86_64) |
+| `SHA256SUMS.txt` | checksums of every file |
 
-No Windows or Linux files are attached; build those on the target system from the source
-(`cd app && cargo build --release`).
+**macOS** files are ad-hoc signed rather than notarised by Apple, so a file downloaded from the net
+carries the system's quarantine flag. Move the app to `/Applications` before the first start —
+launched from the Downloads folder, a quarantined app gets relocated to a random read-only place —
+and if the system refuses to open it, use right click → Open or
+`xattr -dr com.apple.quarantine /Applications/System-Ping.app`. The same applies to the bare binary
+from a browser download (`xattr -d com.apple.quarantine <file>`); files fetched with `curl` are
+unaffected.
+
+**Windows** needs the Visual C++ runtime, which a current Windows has anyway; the `.exe` is portable
+and keeps its state folder next to itself.
+
+**Linux** is built on Ubuntu 24.04 against the system libraries (X11 and Wayland bindings load at
+run time, OpenGL through EGL/GLX). A desktop install has those; otherwise
+`sudo apt install libgl1 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2 libxkbcommon0`. There
+is no `.desktop` file and no AppImage: make it executable and run it.
+
+None of this touches data: state and history stay in the system's state folder (see “State and
+files").
 
 ## Building
 
@@ -55,6 +72,11 @@ cargo test                   # 112 tests (37 unit + 75 integration, no GUI)
 cargo clippy --all-targets   # clean
 ./macos/bundle.sh            # macOS only: -> app/target/macos/System-Ping.app (see below)
 ```
+
+Those same gates run without anyone typing them: `ci.yml` checks every push and pull request on
+Windows, Linux and macOS, and each of those jobs builds a program file that paints one frame
+(`--shot`) — a binary that cannot get a window is not buildable, however well it compiles.
+`release.yml` does the same for the release files (see “Download").
 
 Other systems can be checked by hand (type check only, without binding their libraries):
 
@@ -440,5 +462,7 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
   OS-specific, GUI-free tests in `app/tests`, `build.rs` for the Windows resources, `macos/` for the
   Mac bundle (`bundle.sh` and `Info.plist`), screenshots in `app/shots`)
 * `assets/` — `icon.ico` (file icon) and `icon.png` (window icon at runtime)
+* `.github/workflows/` — `ci.yml` (gates on Windows, Linux and macOS for every push) and
+  `release.yml` (the release files for all three systems, built on a tag)
 * `reference/` — screenshots of the original and own comparison pictures
 * `capture/` — notes about the reference material

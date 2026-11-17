@@ -1,0 +1,196 @@
+# Builds a downloadable program file for each of the three systems and attaches them to the
+# release for the tag that triggered this run.
+#
+# Why this exists at all: the binary for one system cannot be produced on another — the C
+# toolchains and system libraries simply are not there — so "the release has files for Windows and
+# Linux too" needs a runner per system. GitHub's runners have all three, and they cost this
+# repository nothing on disk.
+#
+# Each job builds, paints one frame as a smoke test (a binary that cannot open a window is not
+# worth shipping), packs the system's usual shape, and hands the result to `publish`, which puts
+# every file on one release with one checksum list.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and fill the release of (defaults to the checked-out ref)
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      # One source of truth for the number: app/Cargo.toml, which is also what the title bar, the
+      # "about" text and the macOS Info.plist read.
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: echo "version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' app/Cargo.toml | head -1)" >>"$GITHUB_OUTPUT"
+      - id: pick
+        # A tag push names itself; a manual run either takes the tag from the input or builds the
+        # checked-out ref, whose name is the release it belongs to.
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [ -z "$tag" ] && tag="${GITHUB_REF_NAME}"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+            target: x86_64-unknown-linux-gnu
+            # Same list as in the README's build section — eframe binds these directly.
+            apt: >-
+              pkg-config libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxinerama-dev
+              libxrandr-dev libwayland-dev libxkbcommon-dev xvfb
+          - os: windows-latest
+            name: windows-x64
+            target: x86_64-pc-windows-msvc
+            apt: ""
+          - os: macos-latest
+            name: macos-arm64
+            target: aarch64-apple-darwin
+            apt: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        if: matrix.apt != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      # The bundle script builds the release binary itself, so the macOS job asks it for both.
+      - name: Build
+        run: |
+          if [ "${{ matrix.name }}" = "macos-arm64" ]; then
+            ./macos/bundle.sh
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      # `--shot` paints one frame and writes it out: proof that the file loads, gets a window and
+      # renders. Linux has no display on a runner, so the test runs under Xvfb. A failure here is
+      # deliberate — an artefact that cannot paint should never reach a release.
+      - name: Smoke test (paint one frame)
+        run: |
+          out=smoke-chart.png
+          if [ "${{ matrix.name }}" = "macos-arm64" ]; then
+            bin=target/release/system-ping
+          else
+            bin=target/${{ matrix.target }}/release/system-ping
+            [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
+          fi
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a "$bin" --shot "$out" chart
+          else
+            "$bin" --shot "$out" chart
+          fi
+          test -s "$out"
+
+      # Each system gets the shape its users expect: a .tar.gz with the file for the command
+      # line, an .exe (which carries the icon inside, see app/build.rs), and for macOS the .app
+      # bundle without a terminal window plus the same file on its own. The English readme goes
+      # along because that is the one a Windows or Linux reader lands on.
+      - name: Pack
+        run: |
+          v=${{ needs.version.outputs.version }}
+          a=${{ matrix.name }}
+          cp README.en.md README.md
+          mkdir -p dist
+          case "$a" in
+            linux-x64)
+              cp target/${{ matrix.target }}/release/system-ping "system-ping-$v-linux-x64"
+              tar czf "dist/system-ping-$v-linux-x64.tar.gz" "system-ping-$v-linux-x64" README.md
+              ;;
+            windows-x64)
+              cp target/${{ matrix.target }}/release/system-ping.exe System-Ping.exe
+              cp ../assets/icon.ico .
+              7z a -tzip "dist/System-Ping-$v-windows-x64.zip" System-Ping.exe icon.ico README.md
+              ;;
+            macos-arm64)
+              ditto -c -k --sequesterRsrc --keepParent target/macos/System-Ping.app \
+                "dist/System-Ping-$v-macos-arm64.zip"
+              cp target/release/system-ping "system-ping-$v-macos-arm64"
+              tar czf "dist/system-ping-$v-macos-arm64.tar.gz" "system-ping-$v-macos-arm64" README.md
+              ;;
+          esac
+          # Both commands disagree about spacing ("sum  file" vs "sum file"); the list should read
+          # the same whatever built it, so the extra space is squeezed out.
+          if command -v shasum >/dev/null; then sum="shasum -a 256"; else sum="sha256sum"; fi
+          (cd dist && $sum * | tr -s ' ' >SHA256SUMS-$a.txt)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.name }}
+          path: app/dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      # One checksum list for the whole release instead of one per system.
+      - name: Collect
+        run: |
+          mkdir -p out && cp assets/* out/ 2>/dev/null || true
+          rm -f out/SHA256SUMS-*.txt out/SHA256SUMS.txt
+          (cd out && shasum -a 256 * >SHA256SUMS.txt && ls -l && cat SHA256SUMS.txt)
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          # The notes live in the repository (docs/release-notes/<version>.md) so they are reviewed
+          # like anything else. Without that file the release is created or updated as it is.
+          notes=""
+          file="docs/release-notes/${TAG#v}.md"
+          [ -f "$file" ] && notes="--notes-file $file"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ -n "$notes" ]; then
+              gh release edit "$TAG" $notes
+            fi
+          else
+            # Only reachable for a manual run on a ref without a release; a tag push has its
+            # release made by hand, with the wording that belongs to it.
+            gh release create "$TAG" $notes --title "System-Ping $TAG" || exit 1
+          fi
+          gh release upload "$TAG" out/* --clobber
+          gh release view "$TAG" --json tagName,assets --jq '{tag:.tagName,assets:[.assets[].name]}'

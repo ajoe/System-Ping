@@ -14,21 +14,37 @@ unter „Sprache“ (oder einmalig per `--lang en`). Alle Texte kommen aus einer
 
 ## Herunterladen
 
-Die [aktuelle Version](https://github.com/ajoe/System-Ping/releases/latest) gibt es als fertige
-Datei für **macOS auf Apple Silicon**: ein `.app`-Bundle (Doppelklick, ohne Terminal-Fenster) und
-dieselbe Programmdatei für die Befehlszeile. Beides ist ad-hoc signiert, nicht von Apple
-notarisiert, und ein Download aus dem Netz bekommt deshalb das Quarantäne-Attest des Systems.
+Die [aktuelle Version](https://github.com/ajoe/System-Ping/releases/latest) hat für jedes der drei
+Systeme eine fertige Datei. Gebaut werden sie von GitHub Actions — je System auf dem laufenden
+Runner, weil die Programmdatei für ein System auf einem anderen nicht entsteht — und zwar bei jedem
+Tag: `v0.9.1` ergibt die Dateien unten (`.github/workflows/release.yml`).
 
-Vor dem ersten Start die App nach `/Applications` verschieben — aus dem Download-Ordner heraus
-verlagert macOS eine quarantänebehaftete App sonst an einen zufälligen, schreibgeschützten Ort —
-und, falls macOS sie zurückweist, Sekundärklick → „Öffnen" oder
-`xattr -dr com.apple.quarantine /Applications/System-Ping.app`. Für die einzelne Programmdatei aus
-dem Browser gilt dasselbe (`xattr -d com.apple.quarantine <datei>`); mit `curl` geladene Dateien
-sind nicht betroffen. Zustände und Historie bleiben bei allem unangetastet: Bundle und
-Programmdatei benutzen `~/Library/Application Support/system-ping`.
+| Datei | |
+| --- | --- |
+| `System-Ping-<version>-macos-arm64.zip` | `System-Ping.app` für Apple Silicon: Doppelklick, ohne Terminal-Fenster |
+| `system-ping-<version>-macos-arm64.tar.gz` | dieselbe Programmdatei ohne Bundle, für die Befehlszeile (`--help`) |
+| `System-Ping-<version>-windows-x64.zip` | `System-Ping.exe` (Datei-Symbol und Version stecken in der Datei) und `icon.ico` |
+| `system-ping-<version>-linux-x64.tar.gz` | die Programmdatei für die Befehlszeile (x86_64) |
+| `SHA256SUMS.txt` | Prüfsummen aller Dateien |
 
-Windows- und Linux-Dateien werden nicht mitgeliefert; die entstehen auf dem jeweiligen System aus
-dem Quelltext (`cd app && cargo build --release`).
+**macOS** ist ad-hoc signiert, nicht von Apple notarisiert, und ein Download aus dem Netz bekommt
+deshalb das Quarantäne-Attest des Systems. Vor dem ersten Start die App nach `/Applications`
+verschieben — aus dem Download-Ordner heraus verlagert macOS eine quarantänebehaftete App sonst an
+einen zufälligen, schreibgeschützten Ort — und, falls macOS sie zurückweist, Sekundärklick →
+„Öffnen" oder `xattr -dr com.apple.quarantine /Applications/System-Ping.app`. Für die einzelne
+Programmdatei aus dem Browser gilt dasselbe (`xattr -d com.apple.quarantine <datei>`); mit `curl`
+geladene Dateien sind nicht betroffen.
+
+**Windows** braucht die Visual-C++-Laufzeit, die ein aktuelles Windows ohnehin hat; die `.exe` liegt
+portabel, der Zustandsordner entsteht neben ihr.
+
+**Linux** ist auf Ubuntu 24.04 gegen die Systembibliotheken gebaut (X11- und Wayland-Bindungen werden
+zur Laufzeit geladen, OpenGL über EGL/GLX). Auf einem Desktop sind die da; sonst hilft
+`sudo apt install libgl1 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2 libxkbcommon0`. Eine
+`.desktop`-Datei oder ein AppImage gibt es nicht: ausführbar machen und starten.
+
+Zustände und Historie bleiben bei alledem unangetastet: Bundle und Programmdatei benutzen den
+Zustandsordner des Systems (siehe „Zustand und Dateien").
 
 ## Bauen
 
@@ -56,6 +72,11 @@ cargo test                   # 112 Tests (37 Unit- + 75 Integrationstests, ohne 
 cargo clippy --all-targets   # sauber
 ./macos/bundle.sh            # nur macOS: -> app/target/macos/System-Ping.app (siehe unten)
 ```
+
+Genau diese Gates laufen auch ohne Hand: `ci.yml` prüft jeden Push und Pull Request auf Windows,
+Linux und macOS, und baut dabei jeweils eine Programmdatei, die einen Rahmen malt (`--shot`) — ein
+Binary, das kein Fenster bekommt, ist nicht baubar, auch wenn es kompiliert. `release.yml` macht
+dasselbe für die Release-Dateien (siehe „Herunterladen").
 
 Andere Systeme lassen sich von Hand prüfen (Typ-Check, ohne deren Bibliotheken zu binden):
 
@@ -462,5 +483,7 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
   Windows-Ressourcen, `macos/` für das Mac-Bündel (`bundle.sh` und `Info.plist`),
   Screenshots in `app/shots`)
 * `assets/` — `icon.ico` (Dateisymbol) und `icon.png` (Fenstersymbol zur Laufzeit)
+* `.github/workflows/` — `ci.yml` (die Gates bei jedem Push, auf Windows, Linux und macOS) und
+  `release.yml` (die Release-Dateien für alle drei Systeme, gebaut auf einem Tag)
 * `reference/` — Screenshots des Vorbilds und eigene Vergleichsbilder
 * `capture/` — Hinweise zum Referenzmaterial
