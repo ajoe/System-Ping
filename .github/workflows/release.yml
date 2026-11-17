@@ -112,21 +112,33 @@ jobs:
       # `--shot` paints one frame and writes it out: proof that the file loads, gets a window and
       # renders. Linux has no display on a runner, so the test runs under Xvfb. A failure here is
       # deliberate — an artefact that cannot paint should never reach a release.
+      #
+      # Windows is the one system that cannot be asked this way: a build machine's only display is
+      # the basic render driver, which offers no OpenGL 2.0, and egui_glow stops there. What the
+      # Windows artefact does have to prove is that it starts and its command line answers — every
+      # library it needs has to be loaded for that. The paint itself is covered on the other two
+      # systems and, without a driver, by this repository's own headless gui tests.
+      # The empty `SYSTEM_PING_STATE_DIR` keeps the picture on the built-in targets; see the same
+      # note in ci.yml.
       - name: Smoke test (paint one frame)
         run: |
           out=smoke-chart.png
-          if [ "${{ matrix.name }}" = "macos-arm64" ]; then
-            bin=target/release/system-ping
-          else
-            bin=target/${{ matrix.target }}/release/system-ping
-            [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
-          fi
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            xvfb-run -a "$bin" --shot "$out" chart
-          else
-            "$bin" --shot "$out" chart
-          fi
-          test -s "$out"
+          export SYSTEM_PING_STATE_DIR="$(mktemp -d)"
+          case "${{ matrix.name }}" in
+            macos-arm64)
+              target/release/system-ping --shot "$out" chart
+              test -s "$out"
+              ;;
+            linux-x64)
+              xvfb-run -a target/${{ matrix.target }}/release/system-ping --shot "$out" chart
+              test -s "$out"
+              ;;
+            windows-x64)
+              target/${{ matrix.target }}/release/system-ping.exe --help >help.txt
+              test -s help.txt
+              grep -q -- "--shot" help.txt
+              ;;
+          esac
 
       # Each system gets the shape its users expect: a .tar.gz with the file for the command
       # line, an .exe (which carries the icon inside, see app/build.rs), and for macOS the .app

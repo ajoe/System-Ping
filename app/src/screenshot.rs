@@ -51,6 +51,15 @@ pub struct Screencap {
     edit_row: Option<usize>,
 }
 
+/// Which target the seeded story in the log names: an outage and the recovery of it, so the picture
+/// shows the log doing its job. The second row reads better than the top one, but a machine with a
+/// single target has only the top one — and asking for `targets[1]` unconditionally was an
+/// `index out of bounds` that took a whole `--shot` down on exactly such a machine (a build server
+/// whose state file held one row).
+fn log_target(app: &App) -> Option<&crate::app::Target> {
+    app.targets.get(1).or_else(|| app.targets.first())
+}
+
 impl Screencap {
     pub fn new(app: App, cc: &CreationContext<'_>, path: PathBuf, view: Option<String>) -> Self {
         // From here on the app must not probe (see `capture_armed`).
@@ -168,7 +177,9 @@ impl Screencap {
             &[("n", (n * self.app.targets.len()).to_string())],
         ));
         self.app.alert_count += 1;
-        let label = self.app.targets[1].label.clone();
+        let label = log_target(&self.app)
+            .map(|t| t.label.clone())
+            .unwrap_or_default();
         self.app.log_event(
             LogKind::Outage,
             i18n::fill(
@@ -831,4 +842,42 @@ pub fn horizon_from_arg(name: &str) -> Option<f32> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_target;
+    use crate::app::{App, AppOptions};
+
+    /// An app with exactly these hosts. `set_test_targets` replaces the built-in three and writes
+    /// nothing to disk, which is the only way to end up with one row on purpose.
+    fn app_with(hosts: &[&str]) -> App {
+        let mut app = App::with_theme_override(AppOptions::default(), Vec::new(), None);
+        let rows: Vec<(&str, &str)> = hosts.iter().map(|h| (*h, *h)).collect();
+        app.set_test_targets(&rows);
+        app
+    }
+
+    /// The whole point of the helper: however many rows there are, the row it names exists.
+    #[test]
+    fn the_log_names_a_row_that_exists() {
+        assert!(
+            log_target(&app_with(&[])).is_none(),
+            "no row, nothing to name"
+        );
+
+        let one = app_with(&["10.0.0.1"]);
+        assert_eq!(
+            log_target(&one).map(|t| t.host.clone()),
+            Some("10.0.0.1".to_string()),
+            "one row is that row"
+        );
+
+        let two = app_with(&["10.0.0.1", "10.0.0.2"]);
+        assert_eq!(
+            log_target(&two).map(|t| t.host.clone()),
+            Some("10.0.0.2".to_string()),
+            "two rows: the second one, like before"
+        );
+    }
 }

@@ -63,22 +63,39 @@ jobs:
       - name: Tests
         run: cargo test --workspace --no-fail-fast
 
-      # The same smoke test the release job uses: `--shot` paints one frame and writes a PNG, so
-      # this proves the binary loads, opens a window and renders — not just that it compiles.
-      # Linux needs a display for that, hence xvfb-run. The explicit target is the one the release
-      # artefacts are built for, so CI covers that triple and not just whatever the runner is.
+      # The same smoke test the release job uses, asking each system what that machine can answer.
+      # Linux and macOS paint one frame and write it out: the file loads, gets a window, renders.
+      # A Windows build machine cannot — its only display is the basic render driver, which offers
+      # no OpenGL 2.0, and egui_glow stops there for a reason that has nothing to do with this
+      # program. So Windows asks the command line instead (the whole binary has to be loaded for an
+      # answer), and the tests above have already painted every widget through egui's own software
+      # painter, which needs no driver at all. The explicit target is the one the release artefacts
+      # are built for, so CI covers that triple and not just whatever the runner is.
+      #
+      # `SYSTEM_PING_STATE_DIR` points the run at an empty folder on purpose: the picture should show
+      # the built-in targets, not what the test suite happened to leave in the machine's state file.
+      # It did leave something there, one row, and the seeded picture asked for a second one.
       - name: Smoke test (paint one frame)
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --release --target ${{ matrix.target }}
           bin=target/${{ matrix.target }}/release/system-ping
-          [ "${{ runner.os }}" = "Windows" ] && bin="$bin.exe"
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            xvfb-run -a "$bin" --shot smoke.png chart
-          else
-            "$bin" --shot smoke.png chart
-          fi
-          test -s smoke.png
+          export SYSTEM_PING_STATE_DIR="$(mktemp -d)"
+          case "${{ runner.os }}" in
+            Windows)
+              "$bin.exe" --help >help.txt
+              test -s help.txt
+              grep -q -- "--shot" help.txt
+              ;;
+            Linux)
+              xvfb-run -a "$bin" --shot smoke.png chart
+              test -s smoke.png
+              ;;
+            *)
+              "$bin" --shot smoke.png chart
+              test -s smoke.png
+              ;;
+          esac
 
   # macOS: the cheap gates only. The integration tests that drive a real window are covered here
   # by the release job and by development machines; a headless CI runner has no window server
