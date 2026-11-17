@@ -34,7 +34,7 @@ macOS braucht nur die Command Line Tools (`xcode-select --install`). Unter Windo
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 104 Tests (38 Unit- + 66 Integrationstests, ohne GUI)
+cargo test                   # 112 Tests (37 Unit- + 75 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ./macos/bundle.sh            # nur macOS: -> app/target/macos/System-Ping.app (siehe unten)
 ```

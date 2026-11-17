@@ -91,9 +91,14 @@ impl Screencap {
             return 0;
         }
         let horizon = self.app.options.horizon_secs as f64;
+        // The planted history covers half the window (see the step below), so the session the
+        // picture shows has to be older than that window by the same margin — a process of two
+        // seconds has no day of its own, and everything left of its start would be time before
+        // the app began (see [`crate::runtime::backdate`]).
+        crate::runtime::backdate(horizon * 0.5 + 120.0);
         // One clock for the whole program (`runtime`), so a stamped sample and the view's
         // "now" are on the same axis. Capture happens after the shot's frame loop
-        // (120 frames, ~1.92 s); stamping backwards from that fills the whole window.
+        // (120 frames, ~1.92 s); stamping backwards from that fills the window.
         let base_t = crate::runtime::secs_since_start() + 1.92;
         // Absolute counterpart of `base_t`, so the seeded samples carry a real time too.
         let now_ms = chrono::Utc::now().timestamp_millis() + 1920;
@@ -106,10 +111,13 @@ impl Screencap {
         // be a dotted line, so wide windows get one point per pixel of the plot instead. The
         // cap grows with the window (see `effective_max_samples`), so nothing is thrown away.
         let n = ((self.app.options.horizon_secs / 2.0) as usize).clamp(110, 3_000);
-        // Samples must span the whole visible window: `horizon / n` seconds apart, with the
-        // newest one a step before "now". A fixed spacing (2 s) would only cover part of a
-        // wider window and leave the right side of the plot empty.
-        let step = horizon / n as f64;
+        // Samples must span the visible window: `horizon / n` seconds apart, with the newest one
+        // a step before "now". A fixed spacing (2 s) would only cover part of a wider window and
+        // leave the right side of the plot empty. Half a window, because that is how a session
+        // that was started and left alone actually looks — a monitor that filled a year down to
+        // the last pixel reads as a demo, and the first thing the eye checks on a day picture is
+        // whether there was a night.
+        let step = horizon * 0.5 / n as f64;
         for (i, t) in self.app.targets.iter_mut().enumerate() {
             // Keep the seeded history inside the configured window.
             t.series

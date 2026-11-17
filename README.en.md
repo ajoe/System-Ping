@@ -34,7 +34,7 @@ macOS only needs the command line tools (`xcode-select --install`). On Windows,
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 104 tests (38 unit + 66 integration, no GUI)
+cargo test                   # 112 tests (37 unit + 75 integration, no GUI)
 cargo clippy --all-targets   # clean
 ./macos/bundle.sh            # macOS only: -> app/target/macos/System-Ping.app (see below)
 ```

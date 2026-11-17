@@ -172,6 +172,92 @@ fn a_day_gets_a_sensible_grid() {
     assert_eq!(fmt_axis(86_400.0, tag, None), "24:00 h");
 }
 
+/// A window can reach further back than the session has been running — right after a start with a
+/// one-minute window, or at any time with a day. Those ticks are positions *before* the session
+/// began, and clamping them to zero made the whole axis read „00:00": a clock that looks stopped.
+#[test]
+fn an_axis_reaching_past_the_start_reads_as_such() {
+    use system_ping::ui::fmt_axis;
+
+    assert_eq!(fmt_axis(-25.0, 60.0, None), "-00:25");
+    assert_eq!(fmt_axis(-95.0, 600.0, None), "-01:35");
+    assert_eq!(fmt_axis(-0.5, 60.0, None), "00:00", "not -00:00");
+    assert_eq!(fmt_axis(-5_400.0, 86_400.0, None), "-01:30 h");
+    // Nothing on the axis may repeat: a chart whose every label says the same thing is not a chart.
+    let labels: Vec<String> = (0..12)
+        .map(|i| fmt_axis(-300.0 + i as f64 * 30.0, 600.0, None))
+        .collect();
+    let distinct: std::collections::HashSet<&String> = labels.iter().collect();
+    assert_eq!(distinct.len(), labels.len(), "{labels:?}");
+}
+
+/// A narrow plot cannot show the twelve lines a day is drawn with in a wide window: their labels
+/// land on one another. The ladder is the same, only climbed further.
+#[test]
+fn a_narrow_window_counts_a_day_in_longer_strides() {
+    use system_ping::ui::{nice_step, step_for_width};
+
+    // Enough room: the plain twelve lines per day.
+    assert_eq!(
+        step_for_width(86_400.0, 86_400.0, 1_200.0),
+        nice_step(86_400.0)
+    );
+    // The narrowest window the app allows (its central panel is what is left of 640 px): the step
+    // has to grow until the labels fit.
+    let narrow = step_for_width(86_400.0, 86_400.0, 370.0);
+    assert!(narrow > nice_step(86_400.0), "step stayed at {narrow}");
+    assert!(
+        (86_400.0 / narrow) * 56.0 <= 370.0,
+        "{narrow} s still does not fit 370 px"
+    );
+    // A short window in a wide plot keeps the plain seconds spacing: nothing has to be squeezed.
+    assert_eq!(step_for_width(60.0, 60.0, 1_200.0), 5.0);
+    // And in the narrow one even a short window is counted in coarser strides — thirteen „00:05"
+    // labels do not fit 370 px either.
+    let short_narrow = step_for_width(60.0, 60.0, 370.0);
+    assert!(short_narrow > 5.0, "step stayed at {short_narrow}");
+    assert!(
+        (60.0 / short_narrow) * 56.0 <= 370.0,
+        "{short_narrow} s still does not fit 370 px"
+    );
+}
+
+/// The horizontal lines used to be four fixed numbers of milliseconds. On a chart that runs into the
+/// thousands they all land within a finger's width of the bottom, labels on top of one another, so
+/// the spacing has to follow the scale.
+#[test]
+fn the_millisecond_axis_follows_its_scale() {
+    use system_ping::ui::ms_band_step;
+
+    // A LAN chart, tall: fine round steps, and the familiar 30 and 80 reappear among them.
+    let lan = ms_band_step(100.0, 440.0);
+    assert!(
+        lan <= 30.0,
+        "a tall chart may not go coarser than 30 ms ({lan})"
+    );
+    // Hundreds of milliseconds, short plot: coarse enough that the numbers keep their distance.
+    let slow = ms_band_step(1_400.0, 160.0);
+    assert!(
+        slow > 100.0,
+        "1400 ms in 160 px must be coarser than 100 ms ({slow})"
+    );
+    // Never more than ten lines to count, however the chart is scaled.
+    for scale in [40.0f32, 100.0, 400.0, 1_400.0, 9_000.0, 40_000.0] {
+        for height in [60.0f32, 160.0, 440.0, 900.0] {
+            let s = ms_band_step(scale, height);
+            assert!(
+                scale / s <= 10.0,
+                "{scale} ms in {height} px: {s} ms gives {} lines",
+                scale / s
+            );
+            assert!(
+                height * s / scale >= 14.0 - f32::EPSILON || scale / s <= 1.0,
+                "{scale} ms in {height} px: {s} ms labels collide"
+            );
+        }
+    }
+}
+
 /// The time-window presets have to match the axes: every window needs a grid one can count, and
 /// every window from two hours up is named after the clock.
 #[test]

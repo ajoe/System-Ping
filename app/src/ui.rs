@@ -153,8 +153,10 @@ pub fn top(ui: &mut egui::Ui, app: &mut App) {
 
             // Row 2: everything that takes input — the new-target fields, the interval, the
             // filter and the category switches. Kept apart from row 1 so the two never wrap into
-            // each other at the minimum window width.
-            ui.horizontal(|ui| {
+            // each other at the minimum window width, and wrapped within itself: its items are more
+            // than a narrow window can hold on one line, and a row that does not wrap simply paints
+            // the last of them outside the window.
+            ui.horizontal_wrapped(|ui| {
                 let mut add = false;
                 let host_buf = app.new_host.clone();
                 let label_buf = app.new_label.clone();
@@ -1461,10 +1463,29 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                         .on_hover_text(&trace_tip);
                     // The dash belongs to the text: spacing first, then the label.
                     ui.add_space(7.0);
+                    // The value on the right belongs to the row just as much as the text does, so the
+                    // text column gets what is left of it and no more. Its width is measured rather
+                    // than guessed: the same column shows "—", "46 ms", "1234 ms" or a translated
+                    // word, and a column that ignores that runs its second line under the number.
+                    let value_w = {
+                        let mut font = ui.style().text_styles[&egui::TextStyle::Monospace].clone();
+                        font.size = 12.0;
+                        ui.painter()
+                            .layout_no_wrap(txt.clone(), font, color)
+                            .rect
+                            .width()
+                    };
+                    let text_w =
+                        (ui.available_width() - value_w - ui.spacing().item_spacing.x).max(40.0);
                     ui.vertical(|ui| {
+                        // Truncating needs a width to truncate at, and this is it: both lines end with
+                        // an ellipsis inside the column instead of reaching into the value.
+                        ui.set_max_width(text_w);
                         ui.spacing_mut().item_spacing.y = 1.0;
                         ui.add(
-                            Label::new(RichText::new(label).strong().size(13.0)).selectable(false),
+                            Label::new(RichText::new(label).strong().size(13.0))
+                                .selectable(false)
+                                .truncate(),
                         );
                         let age = if secs_ago < 0.0 {
                             lang.not_probed_yet().to_string()
@@ -1476,7 +1497,8 @@ pub fn left_body(ui: &mut Ui, app: &mut App) {
                         };
                         ui.add(
                             Label::new(RichText::new(format!("{host} · {age}")).weak().size(11.0))
-                                .selectable(false),
+                                .selectable(false)
+                                .truncate(),
                         );
                     });
 
@@ -1800,6 +1822,39 @@ pub fn center_ex(ui: &mut egui::Ui, app: &mut App, shot_frame: bool) {
 
 /* ------------------------------------------------------------------ chart */
 
+/// The distances the time axis may pick its grid lines from: whole, round numbers of seconds.
+const NICE_STEPS: [f64; 19] = [
+    1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1_800.0, 3_600.0, 7_200.0,
+    10_800.0, 14_400.0, 21_600.0, 43_200.0, 86_400.0,
+];
+
+/// Gap between the plot and the axis labels under it, as they are painted.
+/// Room one label on the time axis needs next to its neighbour: the widest thing the axis prints
+/// (a negative „-00:00 h“ is eight glyphs of its 10 px monospace font) plus the air between two.
+const AXIS_LABEL_SLOT: f32 = 56.0;
+
+/// Gap between the plot and the axis labels under it, as they are painted.
+const AXIS_LABEL_GAP: f32 = 3.0;
+
+/// Height the row of axis labels under the plot needs: its gap plus one line of the 10 px
+/// monospace font it is painted in. Allocated, not just painted into — see [`PLOT_BOTTOM_H`].
+const AXIS_LABEL_H: f32 = AXIS_LABEL_GAP + 13.0;
+
+/// Gap between the axis labels and the event log's heading.
+const LOG_GAP: f32 = 6.0;
+
+/// Height of the heading row the event log draws above its list (its buttons decide it).
+const LOG_HEAD_H: f32 = 24.0;
+
+/// Height of the event log's list in the chart view.
+const LOG_H: f32 = 120.0;
+
+/// What the plot does not get, out of the height the centre panel offers: the axis labels, the gap,
+/// the event log's heading and its list. The plot is allocated what is left, which is what keeps the
+/// labels from being painted on top of the log's buttons — they hang below the plot's own rect, in a
+/// band the layout has to be told about.
+const PLOT_BOTTOM_H: f32 = AXIS_LABEL_H + LOG_GAP + LOG_HEAD_H + LOG_H;
+
 fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     let lang = app.lang();
     let m = app.theme_mode;
@@ -1844,9 +1899,17 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         {
             app.jump_to_prev_outlier();
         }
-        // The id whose visibility a click on its name asked to flip; applied after the loop, when
-        // `app.targets` is no longer borrowed by it.
-        let mut toggle: Option<usize> = None;
+    });
+
+    // The legend is a row of its own, and it wraps: with every target in the same row as the
+    // buttons, a long list simply grew past the window's right edge — and because an unwrapped
+    // row also moves the cursor it advanced, the plot below it was then allocated a width the
+    // window does not have, so its axis labels ended up outside the screen.
+    //
+    // The id whose visibility a click on its name asked to flip; applied after the loop, when
+    // `app.targets` is no longer borrowed by it.
+    let mut toggle: Option<usize> = None;
+    ui.horizontal_wrapped(|ui| {
         for t in &app.targets {
             // Only targets the text filter and the category chips let through are listed; among
             // those, a hidden one still appears (weak, hollow knob) so its name can bring it back.
@@ -1883,7 +1946,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                 )
             };
             if ui
-                .add(Label::new(name).selectable(false))
+                .add(Label::new(name).selectable(false).truncate())
                 .on_hover_text(tip)
                 .clicked()
             {
@@ -1898,7 +1961,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     let (rect, resp) = ui.allocate_at_least(
         Vec2::new(
             ui.available_width(),
-            (ui.available_height() - 150.0).max(160.0),
+            (ui.available_height() - PLOT_BOTTOM_H).max(160.0),
         ),
         egui::Sense::click_and_drag(),
     );
@@ -2011,7 +2074,7 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     // a scratch buffer on the app, which keeps this allocation-free per frame.
 
     // Vertical grid + time labels.
-    let step = nice_step(horizon);
+    let step = step_for_width(horizon, t_max - t_min, rect.width());
     // Wide windows are labelled with the wall clock, so a sample's real stamp is needed to
     // turn an axis position into a time of day. All series share one origin (see `reanchor`),
     // so any target that has measured gives the offset between the two clocks.
@@ -2031,13 +2094,20 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             Some(origin) => fmt_axis(gt, horizon, Some(origin + (gt * 1000.0) as i64)),
             None => fmt_axis(gt, horizon, None),
         };
-        ui.painter().text(
-            egui::pos2(x, rect.bottom() + 3.0),
-            egui::Align2::LEFT_TOP,
-            label,
-            FontId::monospace(10.0),
-            m.axis_text(),
-        );
+        // A tick's label begins at its gridline, so the last one of a series would run past the
+        // plot's right edge — and the plot reaches the window's edge, so it would end up outside the
+        // window. Its gridline stays, the number is left out: a label that does not fit is not a
+        // label, and pulling it back inside would put it on top of its neighbour.
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label, FontId::monospace(10.0), m.axis_text());
+        if x + galley.size().x <= rect.right() + 1.0 {
+            ui.painter().galley(
+                egui::pos2(x, rect.bottom() + AXIS_LABEL_GAP),
+                galley,
+                m.axis_text(),
+            );
+        }
         gt += step;
     }
 
@@ -2087,23 +2157,31 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         app.cut_scratch = cuts;
     }
 
-    let bands = [30.0f32, 80.0, 150.0, 300.0];
-    for b in bands {
-        if b >= scale_top {
-            continue;
-        }
+    // The millisecond lines follow the scale instead of being four fixed numbers. A fixed ladder is
+    // fine for a chart that stays under a hundred milliseconds, but on one that runs into the
+    // thousands every one of its lines lands within a finger's width of the bottom — and their labels
+    // stand on top of one another. So: the smallest round step whose labels still fit under each
+    // other, which also keeps every label a number one can read at a glance.
+    let step_ms = ms_band_step(scale_top, rect.height());
+    let mut b = step_ms;
+    while b < scale_top {
         let y = map_y(b, scale_top, rect);
-        ui.painter().line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            Stroke::new(1.0_f32, m.grid()),
-        );
-        ui.painter().text(
-            egui::pos2(rect.left() + 3.0, y - 2.0),
-            egui::Align2::LEFT_BOTTOM,
-            format!("{}{}", b as i32, lang.ms_suffix()),
-            FontId::monospace(10.0),
-            m.axis_text(),
-        );
+        // The number stands above its line, the scale's own top label stands at the top edge — so a
+        // line is left out when its number would end up under that label.
+        if y >= rect.top() + 2.0 + 2.0 * AXIS_BAND_H {
+            ui.painter().line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                Stroke::new(1.0_f32, m.grid()),
+            );
+            ui.painter().text(
+                egui::pos2(rect.left() + 3.0, y - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{}{}", b as i32, lang.ms_suffix()),
+                FontId::monospace(10.0),
+                m.axis_text(),
+            );
+        }
+        b += step_ms;
     }
     // The top edge of the plot is where the auto scale ends, and that number changes with the
     // data. Said out loud, it stops being a guess — especially when spikes are clamped there.
@@ -2279,9 +2357,11 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         }
     }
 
-    // Event log under the chart.
-    ui.add_space(6.0);
-    event_log(ui, app, 120.0);
+    // Event log under the chart. The band its labels were painted into is handed to the layout here,
+    // so the log's own heading starts below them instead of under them.
+    ui.add_space(AXIS_LABEL_H + LOG_GAP);
+    let log_h = (ui.available_height() - LOG_HEAD_H).clamp(48.0, LOG_H);
+    event_log(ui, app, log_h);
 }
 
 /// The outage/recovery log, in both places it appears: as a compact strip under the chart and as
@@ -2418,20 +2498,68 @@ fn map_y(ms: f32, y_max: f32, r: egui::Rect) -> f32 {
     r.bottom() - 2.0 - u * (r.height() - 4.0)
 }
 
+/// Room one label of the millisecond axis needs under its neighbour: its own twelve points plus the
+/// two that lift it off its line.
+const AXIS_BAND_H: f32 = 14.0;
+
+/// The distances the millisecond axis may draw its lines at, as multiples of a decade: round
+/// numbers, and the round ones people read latency in (15, 20, 30, 50, 150 …).
+const MS_BAND_STEPS: [f32; 14] = [
+    1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1_000.0,
+];
+
+/// The spacing of the horizontal grid for a chart scaled to `scale_top` and `height` points tall:
+/// the smallest round step of milliseconds that both keeps the labels one under the other and stays
+/// few enough lines to count. Both get easier as the step grows, so the first that fits is the one.
+/// `pub` for the tests that check a chart of hundreds of milliseconds and a very short one.
+pub fn ms_band_step(scale_top: f32, height: f32) -> f32 {
+    let scale_top = scale_top.max(1.0);
+    let height = height.max(1.0);
+    let fits = |s: f32| height * s / scale_top >= AXIS_BAND_H && scale_top / s <= 10.0;
+    // The ladder, taken decade by decade: a chart scaled to tens of thousands of milliseconds needs
+    // its lines a thousand milliseconds apart, and that number wants to be as round as the small ones.
+    let mut decade = 1.0f32;
+    for _ in 0..6 {
+        for &s in &MS_BAND_STEPS {
+            if fits(s * decade) {
+                return s * decade;
+            }
+        }
+        decade *= 10.0;
+    }
+    scale_top.max(1.0)
+}
+
 /// Distance between two vertical grid lines for a chart window. `pub` so a test can check that
 /// a day does not get the minute spacing of a short window.
 pub fn nice_step(horizon: f64) -> f64 {
     // Hours and days are the part that matters for a wide window: without them a day would
     // fall back to the 900 s default and print sixty grid lines on top of each other.
-    for s in [
-        1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1_800.0, 3_600.0,
-        7_200.0, 10_800.0, 14_400.0, 21_600.0, 43_200.0, 86_400.0,
-    ] {
+    for s in NICE_STEPS {
         if horizon / s <= 12.0 {
             return s;
         }
     }
-    86_400.0
+    *NICE_STEPS.last().unwrap_or(&86_400.0)
+}
+
+/// The step the time axis is drawn with: [`nice_step`]'s, raised along the same ladder until the
+/// labels fit the plot. Twelve lines are what a wide window can take, but the same twelve set their
+/// labels on top of one another as soon as the plot is narrow, so a narrow window counts in longer
+/// strides. `pub` for the test that checks a day in a narrow window.
+pub fn step_for_width(horizon: f64, span_secs: f64, width: f32) -> f64 {
+    let first = NICE_STEPS
+        .iter()
+        .position(|s| *s >= nice_step(horizon))
+        .unwrap_or(0);
+    let mut step = NICE_STEPS[first];
+    for &s in &NICE_STEPS[first..] {
+        step = s;
+        if (span_secs / s) as f32 * AXIS_LABEL_SLOT <= width {
+            break;
+        }
+    }
+    step
 }
 
 /// A tick label on the time axis. Short windows count in minutes and seconds; from about an
@@ -2440,8 +2568,8 @@ pub fn nice_step(horizon: f64) -> f64 {
 /// `pub` for the tests that check what a day's axis prints.
 pub fn fmt_axis(secs: f64, horizon: f64, clock: Option<i64>) -> String {
     if horizon < 2.0 * 3_600.0 {
-        let s = secs.max(0.0) as i64;
-        format!("{:02}:{:02}", s / 60, s % 60)
+        let (sign, s) = split_secs(secs);
+        format!("{sign}{:02}:{:02}", s / 60, s % 60)
     } else if let Some(at_ms) = clock {
         use chrono::{Local, TimeZone};
         match Local.timestamp_millis_opt(at_ms).single() {
@@ -2450,8 +2578,21 @@ pub fn fmt_axis(secs: f64, horizon: f64, clock: Option<i64>) -> String {
         }
     } else {
         // No absolute stamp to show (a session that has not measured yet): count in hours.
-        let s = secs.max(0.0) as i64;
-        format!("{:02}:{:02} h", s / 3_600, (s % 3_600) / 60)
+        let (sign, s) = split_secs(secs);
+        format!("{sign}{:02}:{:02} h", s / 3_600, (s % 3_600) / 60)
+    }
+}
+
+/// Whole seconds of an axis position, and the sign in front of them. An axis position is counted
+/// from the start of the session, so the left part of a window that is wider than the session has
+/// been running lies *before* zero — and clamping that to zero made every one of those ticks read
+/// „00:00“, which looked like a clock that had stopped rather than time before the app started.
+fn split_secs(secs: f64) -> (&'static str, i64) {
+    let s = secs as i64;
+    if s < 0 {
+        ("-", -s)
+    } else {
+        ("", s)
     }
 }
 
