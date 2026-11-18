@@ -217,13 +217,10 @@ Escape, Speichern oder ein Klick auf eine andere Zeile — dabei wird vorher ges
 **Entfernen** gibt es im Editor links oben („entfernen“), also am Ziel, an dem man gerade
 arbeitet — nicht mehr oben rechts am markierten Eintrag.
 
-Ein Ziel anzulegen geht an zwei Stellen: oben in der Leiste und, für den Moment beim Lesen der
-Liste, in den Einstellungen unter **„Ziele“** — mit denselben beiden Feldern und Enter als
-Bestätigung. Daneben stehen drei Vorschlags-Knöpfe (Google DNS, Cloudflare, Quad9), die das Ziel
-nicht nur eintragen, sondern sofort mit dem Messen anfangen; sonst steht eine Zeile in der Liste,
-die niemand misst, und die erste Frage ist, warum das Diagramm leer bleibt. Was dort früher übrig
-blieb (das Löschen des Verlaufs), heißt jetzt **„Messwerte löschen“** bei den Daten und betrifft
-ausdrücklich alle Ziele.
+Ein Ziel anzulegen geht oben in der Leiste — zwei Felder, Enter als Bestätigung. Das Löschen des
+Verlaufs heißt jetzt **„Messwerte löschen“** bei den Daten und betrifft ausdrücklich alle Ziele.
+Unter **„Info“** stehen Version und der Git-Commit, aus dem dieser Build gemacht wurde — bei einem
+Fehlerbericht ist das die Frage, welches Programm genau gemeint ist.
 
 Jedes Ziel bekommt automatisch eine eigene Linienfarbe aus einer Palette von acht Farben; im
 Diagramm, in der Legende, in der Liste links und in den Sparklines ist es immer dieselbe. Der

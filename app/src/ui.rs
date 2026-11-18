@@ -19,11 +19,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) {
     center(ui, app);
 }
 
-/// The same for the two target fields of the settings "Targets" group: their own salts, because the
-/// address field would otherwise share its state with the one in the top bar — focus included.
-const SETTINGS_HOST_ID_SALT: &str = "settings_host_field";
-const SETTINGS_LABEL_ID_SALT: &str = "settings_label_field";
-
 /// Text for a selectable control (the four view buttons, the category chips, "outages only", the
 /// colour scheme). `.weak()` would be the natural way to make these look like quiet controls, and it
 /// used to be written on every one of them — but egui resolves `weak` *before* painting: the galley
@@ -3274,95 +3269,6 @@ fn settings(ui: &mut Ui, app: &mut App) {
 
             ui.add_space(8.0);
             ui.group(|ui| {
-                // A6: creating a target used to mean finding three controls — the column, the "+", the
-                // category. Name and address belong here, and the category decides itself.
-                ui.label(RichText::new(lang.targets()).strong());
-                ui.add_space(4.0);
-                let mut add: Option<(String, String)> = None;
-                // The fields are taken out of the app for this frame and put back at the end — otherwise
-                // egui writes empty strings into them every frame and the typing disappears.
-                let mut pending_host: Option<String> = None;
-                let mut pending_label: Option<String> = None;
-                let mut drop_host = false;
-                let mut drop_label = false;
-                let host_id = ui.scope_id().with(SETTINGS_HOST_ID_SALT);
-                let label_id = ui.scope_id().with(SETTINGS_LABEL_ID_SALT);
-                let mut take =
-                    |id: egui::Id| app.settings_target_ids.remove(&id).unwrap_or_default();
-                let host_key = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.horizontal(|ui| {
-                    let mut host = take(host_id);
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut host)
-                                .hint_text(lang.hint_settings_address())
-                                .desired_width(200.0),
-                        )
-                        .changed()
-                    {
-                        pending_host = Some(host.clone());
-                    }
-                    let mut label = take(label_id);
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut label)
-                                .hint_text(lang.hint_settings_label())
-                                .desired_width(160.0),
-                        )
-                        .changed()
-                    {
-                        pending_label = Some(label.clone());
-                    }
-                    // Enter in the address field is enough — the address is what one types first.
-                    if (ui.button(lang.add_btn()).clicked() || host_key) && !host.trim().is_empty()
-                    {
-                        add = Some((host.trim().to_string(), label.trim().to_string()));
-                        drop_host = true;
-                        drop_label = true;
-                    }
-                });
-                if let Some(host) = pending_host {
-                    app.settings_target_ids.insert(host_id, host);
-                }
-                if let Some(label) = pending_label {
-                    app.settings_target_ids.insert(label_id, label);
-                }
-                if drop_host {
-                    app.settings_target_ids.remove(&host_id);
-                }
-                if drop_label {
-                    app.settings_target_ids.remove(&label_id);
-                }
-                if let Some((host, label)) = add {
-                    // A new target is measured right away too — otherwise it just sits there as an empty
-                    // row and the first impression is a zero.
-                    app.add_suggested_target(&host, &label);
-                }
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(lang.suggestions()).weak().size(11.5));
-                    for (host, label) in [
-                        ("8.8.8.8", "Google DNS"),
-                        ("1.1.1.1", "Cloudflare"),
-                        ("9.9.9.9", "Quad9"),
-                        ("224.0.0.1", "Multicast"),
-                    ] {
-                        if ui
-                            .small_button(label)
-                            .on_hover_text(i18n::fill(
-                                lang.tip_add_suggestion_fmt(),
-                                &[("host", host.to_string())],
-                            ))
-                            .clicked()
-                        {
-                            app.add_suggested_target(host, label);
-                        }
-                    }
-                });
-            });
-
-            ui.add_space(8.0);
-            ui.group(|ui| {
                 // The switch sits in the window itself rather than in a settings file: someone who has
                 // opened the program and cannot read it is exactly the person who cannot find an option
                 // named after a language they do not speak. Each name is written in its own language, so
@@ -3537,7 +3443,7 @@ fn settings(ui: &mut Ui, app: &mut App) {
                     RichText::new(format!(
                         "{} {}\n{}",
                         lang.app_title(),
-                        crate::app::APP_VERSION,
+                        crate::app::about_version(),
                         lang.about_body()
                     ))
                     .weak()

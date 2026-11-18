@@ -365,17 +365,7 @@ macro_rules! texts {
     (de samples_capacity_fmt) => { "rund {n} Messwerte pro Ziel ({mib} MiB) bei {interval} Abstand" };
     (en samples_capacity_fmt) => { "about {n} samples per target ({mib} MiB) at an interval of {interval}" };
 
-    // ---- settings view: suggestions and about ----
-    (de suggestions) => { "Vorschläge:" };
-    (en suggestions) => { "Suggestions:" };
-    (de tip_add_suggestion_fmt) => { "{host} hinzufügen und sofort messen" };
-    (en tip_add_suggestion_fmt) => { "Add {host} and start measuring at once" };
-    (de add_btn) => { "Hinzufügen" };
-    (en add_btn) => { "Add" };
-    (de hint_settings_address) => { "Adresse, z. B. 8.8.8.8" };
-    (en hint_settings_address) => { "Address, e.g. 8.8.8.8" };
-    (de hint_settings_label) => { "Name (leer = Adresse)" };
-    (en hint_settings_label) => { "Name (empty = address)" };
+    // ---- settings view: about ----
     (de about_body) => { "Die Prüfungen laufen über das System-Werkzeug \"ping\" in einem eigenen\n\
                         Arbeiterpool, damit die Oberfläche nie blockiert. Der Verlauf wird lokal\n\
                         gehalten und alle 30 s in den Zustandsordner geschrieben; CSV-Export und\n\
@@ -709,11 +699,6 @@ impl Lang {
         msg_moved_fmt,
         horizon_hint_chart,
         samples_capacity_fmt,
-        suggestions,
-        tip_add_suggestion_fmt,
-        add_btn,
-        hint_settings_address,
-        hint_settings_label,
         about_body,
         keys_heading,
         key_views,
@@ -798,7 +783,7 @@ mod tests {
 
     /// The texts a visible control can show. A text that is empty in one language would silently
     /// render as a blank button, so this test is the guard for both columns of the table.
-    const CONTROLS: [fn(&Lang) -> &'static str; 25] = [
+    const CONTROLS: [fn(&Lang) -> &'static str; 24] = [
         Lang::subtitle,
         Lang::data_folder_btn,
         Lang::stop_all,
@@ -820,7 +805,6 @@ mod tests {
         Lang::measuring,
         Lang::language,
         Lang::export_csv,
-        Lang::add_btn,
         Lang::app_title,
         // The drag handle's tooltip and the answer after a release: both are shown right next
         // to the row, so an empty text would look like a glitch rather than a missing translation.

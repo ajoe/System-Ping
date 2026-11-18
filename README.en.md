@@ -215,12 +215,10 @@ together with what was typed; only cancel, Escape, save or clicking another row 
 pending edit is saved first. **Remove** sits in the editor's top left (“remove”), i.e. at the
 target one is working on — no longer in the top right at the selected entry.
 
-Adding a target works in two places: in the bar above and, while reading the list, in the settings
-under **“Targets”** — with the same two fields and Enter as confirmation. Next to them are three
-suggestion buttons (Google DNS, Cloudflare, Quad9) that not only fill the target in but start
-measuring right away; otherwise a row sits in the list that nobody measures and the first question
-is why the chart stays empty. What used to be left there (deleting the history) is now **“Clear
-measurements”** under Data and expressly affects all targets.
+Adding a target happens in the bar above the list — two fields, Enter as confirmation. Deleting
+the history is now **“Clear measurements”** under Data and expressly affects all targets. Under
+**“Info”** stand the version and the git commit this build was made from — in a bug report, that
+answers which program exactly is meant.
 
 Every target gets its own line colour automatically, from a palette of eight; in the chart, the
 legend, the list on the left and the sparklines it is always the same one. The colour button in the

@@ -7,7 +7,7 @@ use crate::ping::{ProbeJob, ProbeResult};
 use crate::store;
 use crate::theme;
 use egui::Color32;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -63,6 +63,21 @@ pub const AUTO_COLOR: usize = usize::MAX;
 /// The program's version, shown in the About group. It is the one from `Cargo.toml` so the two
 /// cannot drift apart.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The git commit this binary was built from, short form — filled in by `build.rs`, empty for a
+/// build from a source tree without git (a tarball, say). It answers the question a bug report
+/// starts with: which version, exactly?
+pub const GIT_HASH: &str = env!("GIT_HASH");
+
+/// The version as the About group shows it: `0.9.1 (1a2b3c4)`, or bare when the commit is not
+/// known — empty parentheses would be a hole in the text, not an answer.
+pub fn about_version() -> String {
+    if GIT_HASH.is_empty() {
+        APP_VERSION.to_string()
+    } else {
+        format!("{APP_VERSION} ({GIT_HASH})")
+    }
+}
 
 /// One monitored address.
 pub struct Target {
@@ -541,10 +556,6 @@ pub struct App {
     /// Ids of the two new-target fields, filled while the top bar is drawn. The Enter shortcut
     /// compares `Memory::focused` against them (see `ui::NEW_HOST_ID_SALT`).
     pub new_target_ids: [egui::Id; 2],
-    /// The same for the two target fields of the settings "Targets" group — the texts live here
-    /// too, because egui rebuilds that group every frame and a local string would be empty on the
-    /// next click.
-    pub settings_target_ids: HashMap<egui::Id, String>,
     pub pan_offset_secs: f64,
 
     // Log of notable events (outages, recoveries).
@@ -974,7 +985,6 @@ impl App {
                 egui::Id::unique("unset_host"),
                 egui::Id::unique("unset_label"),
             ],
-            settings_target_ids: HashMap::new(),
             protocol: if protocol_on {
                 let path = if trimmed_path.is_empty() {
                     store::state_dir().join("protocol.csv")
@@ -1527,16 +1537,6 @@ impl App {
         self.new_host = host.to_string();
         self.new_label = label.to_string();
         self.add_target();
-    }
-
-    /// Add a target from the suggestions and start measuring right away. The button in the settings
-    /// does both in one step: otherwise the row just sits there without being measured, and the
-    /// first question is why the chart stays empty.
-    pub fn add_suggested_target(&mut self, host: &str, label: &str) {
-        self.add_named_target(host, label);
-        if !self.running {
-            self.start();
-        }
     }
 
     /// The click areas of the rows, as the panel drew them on the last pass: one entry per row *of [`App::targets`]*, in the
@@ -2580,4 +2580,29 @@ fn set_autostart(on: bool) -> bool {
 /// counter it reads is only ever written when the user presses it.
 fn autostart_exists() -> bool {
     crate::platform::autostart::exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{about_version, APP_VERSION, GIT_HASH};
+
+    /// The About line names the version and, when the build knows its commit, that commit too —
+    /// and never a version with empty parentheses, which is a hole in the text, not an answer.
+    #[test]
+    fn the_about_line_says_version_and_commit() {
+        let line = about_version();
+        assert!(
+            line.starts_with(APP_VERSION),
+            "{line} must name the version"
+        );
+        if GIT_HASH.is_empty() {
+            assert_eq!(line, APP_VERSION, "unknown commit: bare version only");
+        } else {
+            assert_eq!(
+                line,
+                format!("{APP_VERSION} ({GIT_HASH})"),
+                "known commit: spelled out in parentheses"
+            );
+        }
+    }
 }
