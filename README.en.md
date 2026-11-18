@@ -76,8 +76,10 @@ cargo clippy --all-targets   # clean
 
 Those same gates run without anyone typing them: `ci.yml` checks every push and pull request on
 Windows, Linux and macOS, and each of those jobs builds a program file that paints one frame
-(`--shot`) — a binary that cannot get a window is not buildable, however well it compiles.
-`release.yml` does the same for the release files (see “Download").
+(`--shot`) — a binary that cannot get a window is not buildable, however well it compiles. Every one
+of those runs builds the Mac bundle too (`System-Ping.app`, see “macOS: a bundle instead of a bare
+program”) and uploads it as an artefact of the run, so that shape is tested by a push and not by a
+release alone. `release.yml` does the same for the release files (see “Download").
 
 Other systems can be checked by hand (type check only, without binding their libraries):
 
@@ -480,7 +482,8 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
   OS-specific, GUI-free tests in `app/tests`, `build.rs` for the Windows resources, `macos/` for the
   Mac bundle (`bundle.sh` and `Info.plist`), screenshots in `app/shots`)
 * `assets/` — `icon.ico` (file icon) and `icon.png` (window icon at runtime)
-* `.github/workflows/` — `ci.yml` (gates on Windows, Linux and macOS for every push) and
+* `.github/workflows/` — `ci.yml` (gates on Windows, Linux and macOS for every push; the Mac bundle
+  as an artefact of the run) and
   `release.yml` (the release files for all three systems, built on a tag)
 * `reference/` — screenshots of the original and own comparison pictures
 * `capture/` — notes about the reference material

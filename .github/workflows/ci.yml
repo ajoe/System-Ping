@@ -3,7 +3,9 @@
 # app/src/platform/, and a check that only ever runs on one of them cannot tell whether a change
 # to that folder kept the other two working.
 #
-# The release artefacts themselves are built by release.yml, which is what runs on a tag.
+# The release artefacts themselves are built by release.yml, which is what runs on a tag. One of
+# them — the macOS bundle — is built here as well and uploaded as an artefact of the run, so the
+# shape a user double-clicks is tested by every push and not by a tag alone.
 
 name: CI
 
@@ -120,3 +122,63 @@ jobs:
 
       - name: Unit tests
         run: cargo test --lib
+
+  # The macOS bundle — the double-clickable program without a terminal window — is built here too,
+  # on every push, and handed up as an artefact of the run. Before this step the shape existed only
+  # at release time (release.yml asks `bundle.sh` for it), which meant a broken `Info.plist` or a
+  # missing `assets/icon.png` was something a release discovered first.
+  #
+  # It is a job of its own, and it waits for the gates above: a tree that does not pass formatting
+  # or Clippy has no artefact worth downloading. The release build it needs is the same one
+  # `bundle.sh` would run on a machine, and rust-cache carries it from the next run on.
+  macos-bundle:
+    runs-on: macos-latest
+    needs: macos-checks
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+
+      - name: Build the bundle
+        run: ./macos/bundle.sh
+
+      # The bundle is checked as a bundle, not as a file that happens to be in a folder: the
+      # property list has to parse and name this version (Finder calls a folder with an unreadable
+      # plist "cannot be opened" and says nothing else), the signature has to cover the folder
+      # rather than leave a signed file inside an unsigned one, and the program inside has to paint
+      # — the same question `--shot` asks of the bare binary, now asked through the shape a user
+      # actually double-clicks.
+      - name: Check the bundle
+        run: |
+          app=target/macos/System-Ping.app
+          plutil -lint "$app/Contents/Info.plist"
+          v=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$v"
+          codesign --verify --strict "$app"
+          export SYSTEM_PING_STATE_DIR="$(mktemp -d)"
+          "$app/Contents/MacOS/system-ping" --shot bundle-chart.png chart
+          test -s bundle-chart.png
+
+      # Zipped by `ditto`, exactly as the release job does it — and not uploaded as a loose folder
+      # because an artefact's own zip format drops the executable bit, which would hand back a
+      # bundle whose program cannot be started.
+      - name: Pack
+        run: |
+          v=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          ditto -c -k --sequesterRsrc --keepParent target/macos/System-Ping.app \
+            "System-Ping-$v-macos-arm64.zip"
+          ls -l "System-Ping-$v-macos-arm64.zip"
+
+      # Shorter than the default retention on purpose: this is a look-alike of the release file for
+      # trying things out, and the file that stays is the one on the release.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-bundle
+          path: app/System-Ping-*-macos-arm64.zip
+          retention-days: 14
+          if-no-files-found: error

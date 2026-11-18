@@ -76,8 +76,11 @@ cargo clippy --all-targets   # sauber
 
 Genau diese Gates laufen auch ohne Hand: `ci.yml` prüft jeden Push und Pull Request auf Windows,
 Linux und macOS, und baut dabei jeweils eine Programmdatei, die einen Rahmen malt (`--shot`) — ein
-Binary, das kein Fenster bekommt, ist nicht baubar, auch wenn es kompiliert. `release.yml` macht
-dasselbe für die Release-Dateien (siehe „Herunterladen").
+Binary, das kein Fenster bekommt, ist nicht baubar, auch wenn es kompiliert. Bei jedem dieser Läufe
+baut `ci.yml` außerdem das Mac-Bündel (`System-Ping.app`, siehe „Mac: ein Bündel statt eines nackten
+Programms") und lädt es als Artefakt des Laufs hoch — geprüft wird die Form damit nicht erst von
+einem Release.
+`release.yml` macht dasselbe für die Release-Dateien (siehe „Herunterladen").
 
 Andere Systeme lassen sich von Hand prüfen (Typ-Check, ohne deren Bibliotheken zu binden):
 
@@ -501,7 +504,8 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
   Windows-Ressourcen, `macos/` für das Mac-Bündel (`bundle.sh` und `Info.plist`),
   Screenshots in `app/shots`)
 * `assets/` — `icon.ico` (Dateisymbol) und `icon.png` (Fenstersymbol zur Laufzeit)
-* `.github/workflows/` — `ci.yml` (die Gates bei jedem Push, auf Windows, Linux und macOS) und
+* `.github/workflows/` — `ci.yml` (die Gates bei jedem Push, auf Windows, Linux und macOS; das
+  Mac-Bündel als Artefakt des Laufs) und
   `release.yml` (die Release-Dateien für alle drei Systeme, gebaut auf einem Tag)
 * `reference/` — Screenshots des Vorbilds und eigene Vergleichsbilder
 * `capture/` — Hinweise zum Referenzmaterial
