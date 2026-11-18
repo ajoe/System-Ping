@@ -102,14 +102,20 @@ fn a_minimised_window_keeps_measuring() {
     );
 
     // The complaint was not about the number of samples but about the hole: the chart showed
-    // nothing for the time the window was away. So the samples have to cover that time. Two
-    // probe intervals of slack: the last probe may still be on its way when the loop stops, and
-    // one that left after the final pass has nobody left to collect it.
+    // nothing for the time the window was away. So the samples have to cover that time — counted
+    // from the first sample, because when *that* one can arrive is the machine's business and not
+    // the app's: the system's own `ping` decides how long a probe takes, and a machine that does
+    // not answer its own loopback at all spends its whole timeout on every probe — there the
+    // first sample is more than a second late while the app measured the entire time. Two probe
+    // intervals of slack: the last probe may still be on its way when the loop stops, and one
+    // that left after the final pass has nobody left to collect it.
+    let first = samples[0].t_secs - from;
     let span = samples.last().unwrap().t_secs - samples[0].t_secs;
+    let after_first = away - first;
     assert!(
-        span + 0.9 >= away,
-        "the samples cover {span:.2} s of the {away:.2} s the window was hidden — the chart \
-         would show a hole"
+        span + 0.9 >= after_first,
+        "the samples cover {span:.2} s of the {after_first:.2} s after the first measurement — \
+         the chart would show a hole"
     );
     for w in samples.windows(2) {
         assert!(
