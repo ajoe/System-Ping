@@ -47,6 +47,10 @@ and run it.
 None of this touches data: state and history stay in the system's state folder (see “State and
 files").
 
+For the newest build of `main` rather than the newest version: the current Mac bundle sits on the
+pre-release page [`releases/tag/dev`](https://github.com/ajoe/System-Ping/releases/tag/dev) — no
+version in the file name, replaced by every push, and therefore without a checksums file.
+
 ## Building
 
 A normal Rust toolchain setup (`rustup`) is required — the MSVC build on Windows. On Linux, besides
@@ -79,7 +83,10 @@ Windows, Linux and macOS, and each of those jobs builds a program file that pain
 (`--shot`) — a binary that cannot get a window is not buildable, however well it compiles. Every one
 of those runs builds the Mac bundle too (`System-Ping.app`, see “macOS: a bundle instead of a bare
 program”) and uploads it as an artefact of the run, so that shape is tested by a push and not by a
-release alone. `release.yml` does the same for the release files (see “Download").
+release alone. The newest of those bundles also sits on a standing pre-release page,
+[`releases/tag/dev`](https://github.com/ajoe/System-Ping/releases/tag/dev): the same file, replaced
+by every push, with no version in its name and no expiry date. `release.yml` does the same for the
+release files (see “Download").
 
 Other systems can be checked by hand (type check only, without binding their libraries):
 

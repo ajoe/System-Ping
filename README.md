@@ -47,6 +47,10 @@ ausführbar machen und starten.
 Zustände und Historie bleiben bei alledem unangetastet: Bundle und Programmdatei benutzen den
 Zustandsordner des Systems (siehe „Zustand und Dateien").
 
+Wer nicht auf die nächste Version warten will, findet das jeweils aktuelle Mac-Bündel von `main` auf
+der Pre-Release-Seite [`releases/tag/dev`](https://github.com/ajoe/System-Ping/releases/tag/dev) —
+ohne Versionsnummer im Namen, bei jedem Push ersetzt, deshalb auch ohne Prüfsummen-Datei.
+
 ## Bauen
 
 Voraussetzung ist ein normales Rust-Toolchain-Setup (`rustup`). Auf Windows ist das der
@@ -79,7 +83,9 @@ Linux und macOS, und baut dabei jeweils eine Programmdatei, die einen Rahmen mal
 Binary, das kein Fenster bekommt, ist nicht baubar, auch wenn es kompiliert. Bei jedem dieser Läufe
 baut `ci.yml` außerdem das Mac-Bündel (`System-Ping.app`, siehe „Mac: ein Bündel statt eines nackten
 Programms") und lädt es als Artefakt des Laufs hoch — geprüft wird die Form damit nicht erst von
-einem Release.
+einem Release. Der jeweils neueste Stand liegt zusätzlich auf einer ständigen Pre-Release-Seite,
+[`releases/tag/dev`](https://github.com/ajoe/System-Ping/releases/tag/dev): dieselbe Datei, bei jedem
+Push ersetzt, ohne Versionsnummer im Namen und ohne Verfallsdatum.
 `release.yml` macht dasselbe für die Release-Dateien (siehe „Herunterladen").
 
 Andere Systeme lassen sich von Hand prüfen (Typ-Check, ohne deren Bibliotheken zu binden):
@@ -513,7 +519,7 @@ system-ping.exe --lang en --theme light --shot app\shots\en-chart.png chart
   Screenshots in `app/shots`)
 * `assets/` — `icon.ico` (Dateisymbol) und `icon.png` (Fenstersymbol zur Laufzeit)
 * `.github/workflows/` — `ci.yml` (die Gates bei jedem Push, auf Windows, Linux und macOS; das
-  Mac-Bündel als Artefakt des Laufs) und
+  Mac-Bündel als Artefakt des Laufs und als Datei auf der `dev`-Pre-Release-Seite) und
   `release.yml` (die Release-Dateien für alle drei Systeme, gebaut auf einem Tag)
 * `reference/` — Screenshots des Vorbilds und eigene Vergleichsbilder
 * `capture/` — Hinweise zum Referenzmaterial

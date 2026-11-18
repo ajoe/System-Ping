@@ -134,6 +134,10 @@ jobs:
   macos-bundle:
     runs-on: macos-latest
     needs: macos-checks
+    # This job is the only one in this file that puts something back into the repository: the
+    # rolling `dev` release further down. `release.yml` asks for the same right for the same reason.
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: app
@@ -182,3 +186,48 @@ jobs:
           path: app/System-Ping-*-macos-arm64.zip
           retention-days: 14
           if-no-files-found: error
+
+      # The artefact above belongs to one run and is gone in a fortnight. This is the other half:
+      # one standing page at `releases/tag/dev`, marked as a pre-release, carrying the newest bundle
+      # of `main` — replaced by every push, so "the current test build" is one link that neither
+      # changes nor expires.
+      #
+      # A push to `main` only: a pull request's token may not write to releases (and a fork's token
+      # may not write at all), and whoever pushed to a pull request has the artefact of their own
+      # run to look at.
+      #
+      # Without a version in the file name, on purpose: with one, `--clobber` would leave the
+      # previous version's file on the page beside the current one, and a page showing two builds
+      # invites the wrong download. Which version and which commit are inside is written into the
+      # page's text instead, on every push.
+      #
+      # And the tag is `dev`, not `v…` — `release.yml` is triggered by `v*`, so a versioned tag
+      # here would start a release build of a development file.
+      - name: Publish as the rolling dev build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          file=System-Ping-dev-macos-arm64.zip
+          ditto -c -k --sequesterRsrc --keepParent target/macos/System-Ping.app "$file"
+          v=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          notes=dev-notes.md
+          {
+            printf 'Rollender Entwicklungsstand von `main`: die Datei hier wird bei jedem Push\n'
+            printf 'neu gebaut und ersetzt. Die Dateien zu einer Version stehen auf dem jeweiligen\n'
+            printf '`v…`-Release.\n\n'
+            printf 'Programmierte Version: `%s`\nCommit: `%s`\nBuild: <%s>\n' \
+              "$v" "$GITHUB_SHA" \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            printf '\nWie alle hier gebauten macOS-Dateien: ad-hoc signiert, nicht notarisiert.\n'
+          } >"$notes"
+          # The page is made by the first run that gets here, pointing at the commit it was built
+          # from; every later run only replaces the file and the text above.
+          if ! gh release view dev >/dev/null 2>&1; then
+            gh release create dev --prerelease --title "System-Ping dev" \
+              --target "$GITHUB_SHA" --notes-file "$notes"
+          fi
+          gh release upload dev "$file" --clobber
+          gh release edit dev --notes-file "$notes"
+          gh release view dev --json tagName,isPrerelease,assets \
+            --jq '{tag:.tagName,prerelease:.isPrerelease,assets:[.assets[].name]}'
