@@ -707,12 +707,15 @@ pub fn window_geom(ctx: &egui::Context) -> Option<store::WindowGeom> {
 }
 
 impl App {
-    /// One frame of the live window: advance the engine, then paint. This is the whole
+    /// One frame of a visible window: advance the engine, then paint. This is the whole
     /// measurement loop of the GUI — `tick` is what schedules probes and moves results into
     /// the series the chart draws, so a frame that skips it paints an empty plot forever.
     /// It lives here (and not only in `eframe::App::ui`) so a test can drive a real frame
     /// without a window: egui hands the root `Ui` of a pass out of
     /// [`egui::Context::run_ui`], and that is what the tests pass in.
+    ///
+    /// A window that is minimised never gets here at all; `eframe::App::logic` is what keeps
+    /// such a window measuring.
     pub fn frame_ui(&mut self, ui: &mut egui::Ui) {
         // Checked on every pass because `on_exit` has no window handle of its own; the last
         // frame before the close is what puts the window back next time. Cheap, and a hidden
@@ -732,6 +735,29 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// The engine step for the passes that show nothing.
+    ///
+    /// While the window is minimised (or hidden, the same rule for `eframe`: a window that is
+    /// not visible or reports itself minimised), `eframe` runs no egui pass at all:
+    /// [`eframe::App::ui`] is skipped and this is called instead, about ten times a second.
+    /// Driving the engine from [`Self::frame_ui`] alone therefore stops the measurement exactly
+    /// at the moment nobody is looking: the probes are not scheduled any more, the results of
+    /// the probes that were already on their way wait in the queue, and the chart shows a hole
+    /// for the whole time the window was away. Since `tick` stamps its samples with the program
+    /// clock ([`crate::runtime`], which keeps running through the break), they arrive with their
+    /// times and the plot stays continuous — only the painting waits for the window.
+    ///
+    /// On a visible window this runs too, right before [`eframe::App::ui`] and so right before the
+    /// `tick` of [`Self::frame_ui`]: the step happens twice per painted frame, and that is
+    /// harmless by design, because a second call for the same moment arms nothing new — every
+    /// target's next probe is already scheduled for the future ([`Self::next_probe_secs`]) and
+    /// the results queue has been drained empty. `a_second_step_at_the_same_moment_arms_nothing`
+    /// in `tests/minimised.rs` keeps that property true.
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let now = self.engine.elapsed_secs();
+        self.tick(now);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // A look chosen in the settings has to be installed before anything is painted, or the
         // frame would use the old accent colours for one pass.

@@ -69,7 +69,7 @@ macOS only needs the command line tools (`xcode-select --install`). On Windows,
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 112 tests (37 unit + 75 integration, no GUI)
+cargo test                   # 127 tests (47 unit + 80 integration, no GUI)
 cargo clippy --all-targets   # clean
 ./macos/bundle.sh            # macOS only: -> app/target/macos/System-Ping.app (see below)
 ```
@@ -380,6 +380,14 @@ stored or typed value lands on the nearest step.
 
 The chart's time window is a preset (5 s to 24 h), not a slider; the log slider has moved out of
 the header and now sits there as a preset list up to 24 h, where it belongs.
+
+Minimising does not interrupt the measuring. Scheduling the probes and collecting their results
+happens in `App::logic`, and `eframe` calls that method even when it is not painting the window —
+so a minimised window keeps measuring just as a visible one does. What arrives in the meantime
+carries the time of the program clock and fills the chart without a hole as soon as the window is
+back on screen; only the painting waits for the window. `app/tests/minimised.rs` drives the app
+the way a minimised window is driven — `logic` in a loop, `ui` never — and checks that the curve
+stays unbroken.
 
 ## Statistics table
 

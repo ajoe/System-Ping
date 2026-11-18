@@ -69,7 +69,7 @@ macOS braucht nur die Command Line Tools (`xcode-select --install`). Unter Windo
 ```sh
 cd app
 cargo build --release        # -> app/target/release/system-ping(.exe)
-cargo test                   # 112 Tests (37 Unit- + 75 Integrationstests, ohne GUI)
+cargo test                   # 127 Tests (47 Unit- + 80 Integrationstests, ohne GUI)
 cargo clippy --all-targets   # sauber
 ./macos/bundle.sh            # nur macOS: -> app/target/macos/System-Ping.app (siehe unten)
 ```
@@ -393,6 +393,14 @@ nächstliegenden Stufe.
 Das Zeitfenster des Diagramms ist eine Voreinstellung (5 s bis 24 h), kein Schieberegler; der
 Log-Slider ist aus der Kopfzeile ausgezogen und sitzt jetzt als Preset-Liste bis 24 h dort, wo er
 hingehört.
+
+Minimieren unterbricht das Messen nicht. Das Einstellen der Prüfungen und das Einsammeln ihrer
+Ergebnisse passiert in `App::logic`, und `eframe` ruft diese Methode auch dann auf, wenn es das
+Fenster gar nicht malt — also auch für ein minimiertes Fenster. Was in der Zeit ankommt, trägt die
+Zeit der Programm-Uhr und füllt das Diagramm lückenlos, sobald das Fenster wieder im Bild ist; nur
+das Malen selbst wartet auf das Fenster. `app/tests/minimised.rs` fährt die App genau so, wie ein
+minimiertes Fenster gefahren wird — `logic` in einer Schleife, `ui` nie — und prüft, dass die Kurve
+trotzdem durchgehend ist.
 
 ## Statistik-Tabelle
 
