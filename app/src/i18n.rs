@@ -214,6 +214,18 @@ macro_rules! texts {
     (en forward_btn) => { "forward ▶" };
     (de chart_heading) => { "Latenzverlauf" };
     (en chart_heading) => { "Latency history" };
+    (de mode_lines) => { "Linien" };
+    (en mode_lines) => { "Lines" };
+    (de mode_points) => { "Punkte" };
+    (en mode_points) => { "Dots" };
+    (de tip_mode_lines) => { "Eine durchgehende Kurve pro Ziel: zeigt, wie sich die Latenz entwickelt" };
+    (en tip_mode_lines) => { "One continuous curve per target: shows how the latency develops" };
+    (de tip_mode_points) => { "Jeder Messwert als eigener Punkt, so groß wie sein Abstand vom \
+                         Durchschnitt des Ziels: Werte dicht am Durchschnitt bleiben Pünktchen, \
+                         Ausreißer nach oben wie nach unten werden größer — sie sind ja das Problem" };
+    (en tip_mode_points) => { "One dot per measurement, sized by its distance from the target's \
+                         average: values near the average stay specks, outliers above and below grow \
+                         — they are the problem" };
     (de tip_legend_hidden_fmt) => { "{host} · ausgeblendet — klicken zum Einblenden" };
     (en tip_legend_hidden_fmt) => { "{host} · hidden — click to show it again" };
     (de tip_legend_shown_fmt) => { "{host} · {status} — klicken zum Ausblenden" };
@@ -618,6 +630,10 @@ impl Lang {
         tip_earlier,
         forward_btn,
         chart_heading,
+        mode_lines,
+        mode_points,
+        tip_mode_lines,
+        tip_mode_points,
         tip_legend_hidden_fmt,
         tip_legend_shown_fmt,
         why_hidden,
@@ -783,7 +799,7 @@ mod tests {
 
     /// The texts a visible control can show. A text that is empty in one language would silently
     /// render as a blank button, so this test is the guard for both columns of the table.
-    const CONTROLS: [fn(&Lang) -> &'static str; 24] = [
+    const CONTROLS: [fn(&Lang) -> &'static str; 28] = [
         Lang::subtitle,
         Lang::data_folder_btn,
         Lang::stop_all,
@@ -799,6 +815,12 @@ mod tests {
         Lang::back_btn,
         Lang::next_btn,
         Lang::earlier_btn,
+        // The chart's two display modes: the words sit right next to each other in the heading, so
+        // a missing one would be impossible to miss — and the tips explain a rule one cannot guess.
+        Lang::mode_lines,
+        Lang::mode_points,
+        Lang::tip_mode_lines,
+        Lang::tip_mode_points,
         Lang::only_problems,
         Lang::col_target,
         Lang::col_status,

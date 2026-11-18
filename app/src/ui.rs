@@ -1894,6 +1894,33 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         {
             app.jump_to_prev_outlier();
         }
+        // The two ways to draw a trace, at the right edge of the heading. They answer different
+        // questions: the line says how the latency develops, the dots say which single measurement
+        // sticks out — and a line hides exactly that when the values around it are the boring ones.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let points = app.options.chart_mode == app::ChartMode::Points;
+            // Clicking the mode that is already showing does nothing: a control that appears to
+            // switch the chart back and forth on every click is worse than one that only changes
+            // something when it actually has to.
+            let want = |ui: &mut egui::Ui, on: bool, text: &str, tip: &str| -> bool {
+                ui.selectable_label(on, selectable_text(text, ""))
+                    .on_hover_text(tip)
+                    .clicked()
+                    && !on
+            };
+            let to_points = want(ui, points, lang.mode_points(), lang.tip_mode_points());
+            let to_lines = want(ui, !points, lang.mode_lines(), lang.tip_mode_lines());
+            if to_points || to_lines {
+                app.options.chart_mode = if to_points {
+                    app::ChartMode::Points
+                } else {
+                    app::ChartMode::Lines
+                };
+                // Saved right away rather than left to the autosave: whoever switches the view
+                // means it, and restarting the program should not quietly undo that.
+                app.save_now();
+            }
+        });
     });
 
     // The legend is a row of its own, and it wraps: with every target in the same row as the
@@ -2133,23 +2160,23 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
     let scale_top = (y_p95 * 1.15).max(40.0);
 
     // C4: which measurements count as outliers depends on the target's whole series and only changes
-    // when a new value arrives. The curves, the rings and the hover read-out need the same cut — so
-    // it is computed once here per frame and target and stored in `cut_scratch` (indexed by target
-    // id, so the read-out never has to re-sort). A hidden target gets `f64::MAX`: it has nothing to
-    // mark.
+    // when a new value arrives. The curves, the dots and the hover read-out need the same cut — and
+    // the dots need the average and the spread it is made of — so all of it is computed once here per
+    // frame and target and stored in `spread_scratch` (indexed by target id, so the read-out never has
+    // to re-sort). A hidden target gets `Spread::NONE`: it has nothing to mark and nothing to size by.
     {
         // Index instead of iterator: `is_shown` needs `app` unchanged, so the vector must not be held
-        // as a mutable borrow at the same time. The cut goes into a local list and is swapped in
+        // as a mutable borrow at the same time. The answers go into a local list and are swapped in
         // afterwards.
-        let mut cuts = Vec::with_capacity(app.targets.len());
+        let mut spreads = Vec::with_capacity(app.targets.len());
         for t in &app.targets {
-            cuts.push(if is_shown(app, t) {
-                history::outlier_cut(t.series.samples()).0
+            spreads.push(if is_shown(app, t) {
+                history::spread(t.series.samples())
             } else {
-                f64::MAX
+                history::Spread::NONE
             });
         }
-        app.cut_scratch = cuts;
+        app.spread_scratch = spreads;
     }
 
     // The millisecond lines follow the scale instead of being four fixed numbers. A fixed ladder is
@@ -2215,8 +2242,15 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
         // lines of the same family overlap.
         let line = app.trace_color(t);
         let width = if sel { 2.0_f32 } else { 1.5_f32 };
-        // Outliers get a ring on the time axis, at the same cut the statistics use.
-        let cut = app.cut_scratch.get(t.id).copied().unwrap_or(f64::MAX);
+        // Outliers get a ring on the time axis, at the same cut the statistics use — and in the
+        // dots view they get the larger dot as well.
+        let sp = app
+            .spread_scratch
+            .get(t.id)
+            .copied()
+            .unwrap_or(history::Spread::NONE);
+        let cut = sp.cut;
+        let dots = app.options.chart_mode == app::ChartMode::Points;
         let mut prev: Option<(f32, f32)> = None;
         // The window is half-open like everywhere else in the chart: a sample that
         // starts a new window belongs to that one, so it must not be drawn twice.
@@ -2241,23 +2275,46 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                 continue;
             }
             let y = map_y(s.rtt_ms.min(scale_top), scale_top, rect);
-            if let Some((px, py)) = prev {
-                // One colour per target: the line says which trace belongs to which row.
-                ui.painter().line_segment(
-                    [egui::pos2(px, py), egui::pos2(x, y)],
-                    Stroke::new(width, line),
-                );
-            }
-            if (s.rtt_ms as f64) > cut {
-                ui.painter().circle_stroke(
+            let out = (s.rtt_ms as f64) > cut;
+            if dots {
+                // A dot per measurement, its size saying how far the value stands from its target's
+                // average: the measurements near the average are the ones nobody has to find, so
+                // they stay specks, and the rare ones far away get a size that can be seen. Values
+                // above the cut are additionally the colour the statistics call an outlier, so the
+                // two views mark the same samples in the same way.
+                let r = dot_radius(s.rtt_ms, &sp);
+                ui.painter().circle_filled(
                     egui::pos2(x, y),
-                    5.0,
-                    Stroke::new(1.5_f32, theme::ORANGE),
+                    r,
+                    if out { theme::ORANGE } else { line },
                 );
                 // Off-screen spike: a marker at the top of the plot so it is still findable.
                 if s.rtt_ms > scale_top {
                     ui.painter()
                         .circle_filled(egui::pos2(x, rect.top() + 4.0), 3.0, theme::ORANGE);
+                }
+            } else {
+                if let Some((px, py)) = prev {
+                    // One colour per target: the line says which trace belongs to which row.
+                    ui.painter().line_segment(
+                        [egui::pos2(px, py), egui::pos2(x, y)],
+                        Stroke::new(width, line),
+                    );
+                }
+                if out {
+                    ui.painter().circle_stroke(
+                        egui::pos2(x, y),
+                        5.0,
+                        Stroke::new(1.5_f32, theme::ORANGE),
+                    );
+                    // Off-screen spike: a marker at the top of the plot so it is still findable.
+                    if s.rtt_ms > scale_top {
+                        ui.painter().circle_filled(
+                            egui::pos2(x, rect.top() + 4.0),
+                            3.0,
+                            theme::ORANGE,
+                        );
+                    }
                 }
             }
             prev = Some((x, y));
@@ -2270,8 +2327,20 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
             if s.t_secs >= t_min && s.t_secs < t_max && history::is_ok(s.rtt_ms) {
                 let x = map_x(s.t_secs, t_min, t_max, rect);
                 let y = map_y(s.rtt_ms.min(scale_top), scale_top, rect);
-                ui.painter()
-                    .circle_filled(egui::pos2(x, y), if sel { 3.4 } else { 2.4 }, line);
+                let base = if sel { 3.4 } else { 2.4 };
+                // In the dots view the last measurement is also just a measurement: an outlier
+                // among them must not be painted over in the target's quiet colour, or the newest
+                // problem would be the one thing the chart hides.
+                let out = dots && (s.rtt_ms as f64) > cut;
+                ui.painter().circle_filled(
+                    egui::pos2(x, y),
+                    if out {
+                        dot_radius(s.rtt_ms, &sp).max(base)
+                    } else {
+                        base
+                    },
+                    if out { theme::ORANGE } else { line },
+                );
             }
         }
     }
@@ -2296,7 +2365,12 @@ fn chart(ui: &mut Ui, app: &mut App, shot_frame: bool) {
                 if let Some(s) = nearest(t, t_at) {
                     // C4: the outlier threshold is computed exactly once per frame and target (see the
                     // cut before the curves) and is only read here.
-                    let cut = app.cut_scratch.get(t.id).copied().unwrap_or(f64::MAX);
+                    let cut = app
+                        .spread_scratch
+                        .get(t.id)
+                        .copied()
+                        .unwrap_or(history::Spread::NONE)
+                        .cut;
                     rows.push((
                         format!(
                             "{}  {}{}",
@@ -2491,6 +2565,34 @@ fn map_t(x: f32, t_min: f64, t_max: f64, r: egui::Rect) -> f64 {
 fn map_y(ms: f32, y_max: f32, r: egui::Rect) -> f32 {
     let u = ms / y_max.max(1.0);
     r.bottom() - 2.0 - u * (r.height() - 4.0)
+}
+
+/// The smallest dot in the dots view: a measurement that sits where its target usually sits.
+const DOT_SPECK: f32 = 1.0;
+
+/// The largest dot in the dots view, which a value four standard deviations out reaches.
+const DOT_OUTLIER: f32 = 4.5;
+
+/// How big one measurement's dot is drawn, in pixels: its distance from the target's own average,
+/// in that target's own standard deviations.
+///
+/// The rule turns the picture the other way round from a line. Measurements close to the average
+/// are individually uninteresting — that is what an average says — so they get a speck. The ones
+/// far from it are rare, and in a latency curve a rare value is the problem one is looking for: a
+/// connection that jumps, a route that was rebuilt. Drawn the same size as every other measurement
+/// they hide in the crowd of the uninteresting ones.
+///
+/// Both directions count: a reply that is strangely *fast* is as much of a surprise as a slow one.
+/// The scale ends at four standard deviations — beyond that a dot would only grow into its
+/// neighbours without saying anything new.
+fn dot_radius(rtt_ms: f32, sp: &history::Spread) -> f32 {
+    // Without a spread nothing stands out: a target with too few replies to say anything about its
+    // average, or one that answers with the same millisecond every time, gets specks only.
+    if !rtt_ms.is_finite() || !sp.sigma.is_finite() || sp.sigma < 1e-6 {
+        return DOT_SPECK;
+    }
+    let sigmas = ((rtt_ms as f64 - sp.avg).abs() / sp.sigma).min(4.0) as f32;
+    DOT_SPECK + (DOT_OUTLIER - DOT_SPECK) * (sigmas / 4.0)
 }
 
 /// Room one label of the millisecond axis needs under its neighbour: its own twelve points plus the
@@ -3471,4 +3573,66 @@ pub fn default_export_path() -> PathBuf {
 pub fn default_export_name() -> String {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     format!("system-ping-{stamp}.csv")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dot_radius, DOT_OUTLIER, DOT_SPECK};
+    use crate::history::Spread;
+
+    /// A known average and spread, as one frame of the chart would have computed them.
+    fn spread(avg: f64, sigma: f64) -> Spread {
+        Spread {
+            avg,
+            sigma,
+            cut: avg + 3.0 * sigma,
+            above: 0,
+        }
+    }
+
+    /// The dots view turns on distance from the average: a value that sits there is a speck, and
+    /// the further one stands away, the bigger its dot — until the size stops growing, because a
+    /// dot wider than its neighbour's says nothing new.
+    #[test]
+    fn dots_grow_with_the_distance_from_the_average() {
+        let sp = spread(20.0, 2.0);
+        assert_eq!(dot_radius(20.0, &sp), DOT_SPECK, "at the average: a speck");
+        let mut previous = DOT_SPECK;
+        for rtt in [21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0] {
+            let r = dot_radius(rtt, &sp);
+            assert!(
+                r > previous,
+                "{rtt} ms is further from 20 ms than {} ms and has to be drawn bigger",
+                rtt - 1.0
+            );
+            previous = r;
+        }
+        // The outlier cut (three deviations) has to land where the eye expects it: clearly bigger
+        // than the crowd, and no longer than the largest dot the view ever draws.
+        let outlier = dot_radius(26.0, &sp);
+        assert!(
+            outlier > 3.0 && outlier < DOT_OUTLIER,
+            "at the cut: {outlier}"
+        );
+        assert_eq!(dot_radius(10_000.0, &sp), DOT_OUTLIER, "and no bigger");
+    }
+
+    /// Slow is not the only surprise: a reply that comes strangely fast is as far from the average
+    /// as one that is equally late, so both get the same dot.
+    #[test]
+    fn fast_and_slow_are_the_same_distance() {
+        let sp = spread(20.0, 10.0);
+        assert_eq!(dot_radius(10.0, &sp), dot_radius(30.0, &sp));
+        assert!(dot_radius(10.0, &sp) > DOT_SPECK);
+    }
+
+    /// Without a spread nothing stands out — a target whose few replies are all it has, or one that
+    /// answers with the same millisecond every time. Those get specks, not a field of maximum-size
+    /// dots, which is what dividing by a spread of zero would produce.
+    #[test]
+    fn without_spread_everything_stays_a_speck() {
+        assert_eq!(dot_radius(999.0, &Spread::NONE), DOT_SPECK);
+        assert_eq!(dot_radius(999.0, &spread(20.0, 0.0)), DOT_SPECK);
+        assert_eq!(dot_radius(f32::NAN, &spread(20.0, 2.0)), DOT_SPECK);
+    }
 }

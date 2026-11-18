@@ -334,6 +334,25 @@ Besides “◀ back”/“forward ▶” and the jump buttons to outliers (⚑),
   the axis stays a name the combo box can show too. Zooming leaves “live”.
 * **Double-click in the chart** goes back to the end: the window is set to “live”.
 
+## How the chart paints: lines or dots
+
+Two buttons sit at the right edge of the chart's heading, **“Lines”** and **“Dots”**. They answer
+two different questions, which is why there are both:
+
+* **Lines** (the default) connects each target's measurements into one curve. It shows *how* the
+  latency develops — a slow climb, a step after a reboot.
+* **Dots** paints every measurement as a dot of its own, and its size says how far the value stands
+  from the **average of that target** — measured against the target's own spread. Values near the
+  average stay specks; individually they are not interesting, the average has already said what
+  they mean. What lies far out, above or below, is painted larger and in the colour the statistics
+  use for an outlier.
+
+Behind this: the problem with a connection is its outliers, and those are rare. In a curve that is
+made mostly of the boring values between them, they disappear — as dots of different sizes they
+stand out on their own. The same number the measurements table and the orange rings use decides
+which ones: more than three standard deviations above the average of the target's own series. The
+mode is saved together with the other settings.
+
 ## Keyboard
 
 The shortcuts are printed on the view buttons and listed in the settings under “Keyboard”. They

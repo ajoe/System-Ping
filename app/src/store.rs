@@ -531,6 +531,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The chart's display mode is a setting like any other: it has to survive a restart, and a
+    /// file written before the option existed has to keep drawing what it always drew — the line.
+    /// Reading a missing setting as "dots" would change somebody's chart under their feet.
+    #[test]
+    fn the_chart_mode_survives_a_restart_and_an_old_file() {
+        let dir = std::env::temp_dir().join(format!("system-ping-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Written before the option existed: no `chart_mode` anywhere in the block.
+        std::fs::write(
+            state_path_in(&dir),
+            r#"{"version":2,"options":{"horizon_secs":300.0},"history":[]}"#,
+        )
+        .unwrap();
+        let (opts, _, _) = load_with_window(&dir);
+        assert_eq!(opts.chart_mode, crate::app::ChartMode::Lines);
+        assert_eq!(opts.horizon_secs, 300.0, "the rest of the block is read");
+
+        // Written by this version: the choice comes back as it was left.
+        let opts = AppOptions {
+            chart_mode: crate::app::ChartMode::Points,
+            ..AppOptions::default()
+        };
+        save_to(&dir, &opts, &[]).unwrap();
+        let (back, _, _) = load_with_window(&dir);
+        assert_eq!(back.chart_mode, crate::app::ChartMode::Points);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A file too big to be this app's own settings is refused instead of being read.
     ///
     /// The size limit is handed to [`read_state`] as an argument rather than read from the constant

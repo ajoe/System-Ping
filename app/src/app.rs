@@ -141,6 +141,10 @@ pub struct AppOptions {
     pub concurrency: usize,
     /// Chart window width in seconds. [`HORIZON_CHOICES`] offers presets up to a day.
     pub horizon_secs: f32,
+    /// How a target's measurements are drawn: as a line, or as dots sized by their distance from
+    /// the target's average. Missing in old files -> the line, which is how it was always drawn.
+    #[serde(default)]
+    pub chart_mode: ChartMode,
     /// Max samples kept per target. `0` means "as many as the chart window needs" — see
     /// [`samples_for_horizon`]. That default is what makes a 24 h window possible at all: with
     /// a fixed cap of 2048 the day would be cut off after half an hour.
@@ -185,6 +189,21 @@ fn default_theme() -> String {
 pub struct HorizonChoice {
     pub secs: f32,
     pub label: &'static str,
+}
+
+/// How the chart draws a target's measurements. Two questions, and a trace can only answer one of
+/// them well: a line shows how the latency *develops* — a slow climb, a step after a reboot — while
+/// dots show which *single* measurement sticks out, which a line hides exactly when the values in
+/// between are the boring ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartMode {
+    /// One continuous curve per target, as the chart has always been drawn.
+    #[default]
+    Lines,
+    /// Every measurement as a dot of its own, its size saying how far it stands from the target's
+    /// average. The rare value far from the average is the one worth finding, so it gets the size.
+    Points,
 }
 
 /// The window lengths the chart offers, shortest first. A day is the longest on purpose:
@@ -362,6 +381,7 @@ impl Default for AppOptions {
             timeout_ms: 2000,
             concurrency: 4,
             horizon_secs: 60.0,
+            chart_mode: ChartMode::Lines,
             // 0 = "as many as the chart window needs" (see `effective_max_samples`). A fixed number
             // would cut a 24 h window off after half an hour.
             max_samples: 0,
@@ -617,10 +637,10 @@ pub struct App {
     pub chart_p95: Vec<f32>,
     /// Scratch buffer for [`history::Series::stats_window`], reused every frame.
     pub stats_scratch: Vec<f32>,
-    /// One millisecond value per target: the threshold above which a measurement counts as an
-    /// outlier. Filled once per frame by the chart and read by both the curves and the hover read-
-    /// out, so the same computation does not run several times per picture.
-    pub cut_scratch: Vec<f64>,
+    /// One entry per target: average, spread and the outlier cut that follows from them. Filled
+    /// once per frame by the chart and read by the curves, the dots and the hover read-out, so the
+    /// same computation does not run several times per picture.
+    pub spread_scratch: Vec<history::Spread>,
     /// Every latency of the shown targets in one vector, for the median and p95 of the totals row.
     /// Only as long as the number of replies together — see [`App::stats_total`].
     pub all_rtt_scratch: Vec<f32>,
@@ -971,7 +991,7 @@ impl App {
             status_auto: None,
             chart_p95: Vec::new(),
             stats_scratch: Vec::new(),
-            cut_scratch: Vec::new(),
+            spread_scratch: Vec::new(),
             all_rtt_scratch: Vec::new(),
             row_rects: Vec::new(),
             row_heights: Vec::new(),

@@ -57,10 +57,41 @@ pub fn pick(sorted: &[f32], f: f64) -> f32 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-/// The outlier cut for a series: mean plus `OUTLIER_SIGMA` standard deviations of
-/// the replies, and how many samples sit above it. Losses are not outliers — they
-/// have no latency to be an outlier of.
-pub fn outlier_cut(samples: &[Sample]) -> (f64, usize) {
+/// Average and spread of a series' replies, and the outlier cut that follows from them.
+///
+/// All three come from one pass over the data because the chart needs them together in the same
+/// frame: `cut` decides which measurements deserve a mark, and the distance from `avg` measured in
+/// `sigma` decides how big a dot has to be to say "look here". Asking for them one at a time would
+/// add up the same numbers twice per frame and per target.
+#[derive(Clone, Copy, Debug)]
+pub struct Spread {
+    /// Mean of the replies, in ms.
+    pub avg: f64,
+    /// Standard deviation of the replies, in ms: how far a value has to stand from `avg` to be rare.
+    pub sigma: f64,
+    /// `avg + OUTLIER_SIGMA * sigma` — above this, a reply counts as an outlier.
+    pub cut: f64,
+    /// How many replies sit above `cut`.
+    pub above: usize,
+}
+
+impl Spread {
+    /// "Nothing is known about this series": nothing to mark and nothing to size by.
+    ///
+    /// Deliberately not `Default`: a zeroed `cut` would make every measurement an outlier, so the
+    /// unknown case has to be spelled out instead of falling out of a derive.
+    pub const NONE: Spread = Spread {
+        avg: 0.0,
+        sigma: 0.0,
+        cut: f64::INFINITY,
+        above: 0,
+    };
+}
+
+/// Average, spread and cut of the replies in `samples`. Losses are not replies — they have no
+/// latency to average. Fewer than four replies are too few to speak of an average at all, so the
+/// answer is then [`Spread::NONE`].
+pub fn spread(samples: &[Sample]) -> Spread {
     let mut n = 0usize;
     let mut sum = 0.0f64;
     for s in samples {
@@ -70,7 +101,7 @@ pub fn outlier_cut(samples: &[Sample]) -> (f64, usize) {
         }
     }
     if n < 4 {
-        return (f64::INFINITY, 0);
+        return Spread::NONE;
     }
     let avg = sum / n as f64;
     let mut var = 0.0f64;
@@ -81,12 +112,26 @@ pub fn outlier_cut(samples: &[Sample]) -> (f64, usize) {
         }
     }
     var /= n as f64;
-    let cut = avg + OUTLIER_SIGMA * var.sqrt();
-    let count = samples
+    let sigma = var.sqrt();
+    let cut = avg + OUTLIER_SIGMA * sigma;
+    let above = samples
         .iter()
         .filter(|s| is_ok(s.rtt_ms) && s.rtt_ms as f64 > cut)
         .count();
-    (cut, count)
+    Spread {
+        avg,
+        sigma,
+        cut,
+        above,
+    }
+}
+
+/// The outlier cut for a series: mean plus `OUTLIER_SIGMA` standard deviations of
+/// the replies, and how many samples sit above it. Losses are not outliers — they
+/// have no latency to be an outlier of.
+pub fn outlier_cut(samples: &[Sample]) -> (f64, usize) {
+    let s = spread(samples);
+    (s.cut, s.above)
 }
 
 /// Ring buffer of samples for one target, oldest first.
@@ -261,4 +306,78 @@ pub struct Stats {
     pub outliers: usize,
     /// Losses that were DNS failures rather than silent timeouts.
     pub dns_fails: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_ok, outlier_cut, spread, Sample, Spread};
+
+    /// One reply, at seconds `t` of a session.
+    fn reply(t: f64, rtt_ms: f32) -> Sample {
+        Sample {
+            t_secs: t,
+            at_ms: 0,
+            rtt_ms,
+            fail: None,
+        }
+    }
+
+    /// Average and spread of the replies — and losses stay out of both. An outage has no latency,
+    /// so counting one would pull the average of a healthy target towards zero and make every
+    /// normal reply look like an outlier.
+    #[test]
+    fn spread_averages_replies_only() {
+        let s = spread(&[
+            reply(0.0, 10.0),
+            reply(1.0, 20.0),
+            reply(2.0, 10.0),
+            reply(3.0, 20.0),
+            Sample {
+                t_secs: 4.0,
+                at_ms: 0,
+                rtt_ms: -1.0,
+                fail: Some(crate::history::Fail::Timeout),
+            },
+        ]);
+        assert!(
+            (s.avg - 15.0).abs() < 1e-9,
+            "the four replies average 15: {s:?}"
+        );
+        assert!(
+            (s.sigma - 5.0).abs() < 1e-9,
+            "half their range, in ms: {s:?}"
+        );
+        assert_eq!(s.above, 0, "nothing is 15 ms above an average of 15");
+        assert!(s.cut > 20.0);
+        assert!(is_ok(10.0) && !is_ok(-1.0));
+    }
+
+    /// The cut is the average plus three deviations, and it counts what sits above it — the same
+    /// numbers the chart's rings and the statistics table's outlier column use. `outlier_cut` is
+    /// the old view onto them and has to keep answering the same way.
+    #[test]
+    fn the_cut_marks_the_rare_slow_reply() {
+        let mut samples: Vec<Sample> = (0..30).map(|i| reply(i as f64, 10.0)).collect();
+        samples.push(reply(30.0, 900.0));
+        let s = spread(&samples);
+        assert_eq!(s.above, 1, "the one spike, and nothing else");
+        assert!(
+            s.cut > 10.0 && s.cut < 900.0,
+            "cut between the crowd and the spike"
+        );
+        assert_eq!(outlier_cut(&samples), (s.cut, s.above));
+    }
+
+    /// Too few replies to say anything about an average: the answer is the explicit unknown, whose
+    /// cut is above everything so nothing gets marked.
+    #[test]
+    fn three_replies_are_not_an_average() {
+        let s = spread(&[reply(0.0, 1.0), reply(1.0, 2.0), reply(2.0, 900.0)]);
+        assert!(
+            s.cut == f64::INFINITY && s.sigma == 0.0,
+            "unknown, not a number: {s:?}"
+        );
+        assert_eq!(s.above, 0);
+        assert_eq!(Spread::NONE.cut, f64::INFINITY);
+    }
 }

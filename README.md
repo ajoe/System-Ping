@@ -343,6 +343,26 @@ werden:
   verlässt „Live“.
 * **Doppelklick ins Diagramm** geht zurück an das Ende: Fenster wird auf „Live“ gesetzt.
 
+## Wie das Diagramm malt: Linien oder Punkte
+
+Rechts in der Kopfzeile des Diagramms sitzen zwei Knöpfe, **„Linien“** und **„Punkte“**. Sie
+beantworten zwei verschiedene Fragen, deshalb gibt es beide:
+
+* **Linien** (Standard) verbindet die Messwerte jedes Ziels zu einer Kurve. Sie zeigt, *wie sich*
+  die Latenz entwickelt — ein langsamer Anstieg, ein Sprung nach einem Neustart.
+* **Punkte** malt jeden Messwert als eigenen Punkt, und die Größe sagt, wie weit der Wert vom
+  **Durchschnitt dieses Ziels** entfernt liegt — gemessen an der eigenen Streuung des Ziels. Werte
+  dicht am Durchschnitt bleiben Pünktchen; sie sind einzeln nicht interessant, das sagt der
+  Durchschnitt schon. Was weit draußen liegt, nach oben wie nach unten, wird größer gemalt und in
+  der Farbe, die auch die Statistik als Ausreißer markiert.
+
+Der Punkt dahinter: Das Problem an einer Verbindung sind die Ausreißer, und die sind selten. In
+einer Kurve, die von den langweiligen Werten zwischen ihnen gemacht wird, verschwinden sie — als
+Punkte in verschiedener Größe fallen sie von selbst auf. Ausgesucht wird dafür nach demselben
+Wert, den auch die Messwerte-Tabelle und die orangen Ringe benutzen: mehr als drei
+Standardabweichungen über dem Durchschnitt der eigenen Messreihe. Der Modus wird mit den übrigen
+Einstellungen gesichert.
+
 ## Tastatur
 
 Die Kürzel stehen auf den Ansichts-Knöpfen und sind in den Einstellungen unter „Tastatur“
