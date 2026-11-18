@@ -170,10 +170,10 @@ jobs:
               tar czf "dist/system-ping-$v-macos-arm64.tar.gz" "system-ping-$v-macos-arm64" README.md
               ;;
           esac
-          # Both commands disagree about spacing ("sum  file" vs "sum file"); the list should read
-          # the same whatever built it, so the extra space is squeezed out.
+          # Both spellings print the same "hash  file" lines — verified, not assumed — so either
+          # one's output is checkable by `shasum -a 256 -c` and `sha256sum -c` on every system.
           if command -v shasum >/dev/null; then sum="shasum -a 256"; else sum="sha256sum"; fi
-          (cd dist && $sum * | tr -s ' ' >SHA256SUMS-$a.txt)
+          (cd dist && $sum * >SHA256SUMS-$a.txt)
           ls -l dist
 
       - uses: actions/upload-artifact@v7
@@ -190,7 +190,12 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          path: assets
+          # Not `assets` — that is the name of the repository's icon folder from the checkout, and
+          # the download would merge the two and `find` would collect both without anyone meaning
+          # to. (That is how the icons ended up on the release once, in fact: by accident.) The
+          # release carries exactly the files the README's download table promises — the icons
+          # travel inside the Windows zip and the Mac bundle, where users actually meet them.
+          path: picked
           merge-multiple: true
 
       # One checksum list for the whole release instead of one per system. Every artefact arrives in
@@ -201,10 +206,12 @@ jobs:
       - name: Collect
         run: |
           mkdir -p out
-          find assets -type f -exec cp {} out/ \;
+          find picked -type f -exec cp {} out/ \;
           rm -f out/SHA256SUMS-*.txt out/SHA256SUMS.txt
           test -n "$(ls -A out)" || { echo "no artefacts came from the build jobs" >&2; exit 1; }
-          (cd out && shasum -a 256 * >SHA256SUMS.txt && ls -l && cat SHA256SUMS.txt)
+          # sha256sum, not shasum: this step runs on ubuntu, and sha256sum's own output is already
+          # the checkable two-space form (see the Pack step's note).
+          (cd out && sha256sum * >SHA256SUMS.txt && ls -l && cat SHA256SUMS.txt)
 
       - name: Release
         env:
