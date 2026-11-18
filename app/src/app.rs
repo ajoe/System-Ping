@@ -619,6 +619,8 @@ pub struct App {
     /// Session clock of the last write to the state file — the autosave in [`Self::tick`] as well
     /// as every explicit save. Drives "saved N s ago" in the status bar, which is what tells the
     /// user a change is on disk; a plain "save" button next to it was never needed.
+    /// Negative means no save has gone through in this run yet; `0.0` is a real time, because the
+    /// shared clock ([`crate::runtime`]) starts lazily and a first save can land exactly on it.
     pub last_save_secs: f64,
 
     pub status_msg: String,
@@ -1011,7 +1013,7 @@ impl App {
             // An empty channel to start with; `open_export_dialog` swaps in the real receiver.
             export_dialog: std::rc::Rc::new(std::sync::mpsc::channel().1),
             autostart_state: Arc::new(AtomicUsize::new(usize::MAX)),
-            last_save_secs: 0.0,
+            last_save_secs: -1.0,
             status_msg: Lang::default().msg_ready().to_string(),
             status_note: None,
             status_auto: None,
@@ -2079,10 +2081,12 @@ impl App {
         }
     }
 
-    /// How long ago the state file was last written, in seconds. Negative or very large means:
-    /// nothing has been saved during this run yet (the autosave runs every 8 s).
+    /// How long ago the state file was last written, in seconds. Negative means: nothing has been
+    /// saved during this run yet (the autosave runs every 8 s). Note that a save can legitimately
+    /// land on `0.0` — the session clock starts lazily and can be born the moment the first save
+    /// reads it — so "never saved" has to be a negative sentinel, not zero.
     pub fn save_age_secs(&self) -> f64 {
-        if self.last_save_secs <= 0.0 {
+        if self.last_save_secs < 0.0 {
             return -1.0;
         }
         (self.engine.elapsed_secs() - self.last_save_secs).max(0.0)

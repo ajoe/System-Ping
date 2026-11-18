@@ -132,9 +132,9 @@ fn a_save_that_cannot_write_says_so_and_does_not_count() {
 fn a_save_that_works_leaves_a_file_and_ages_the_line() {
     let dir = StateDir::new("save-works");
     let mut app = system_ping::app::App::new(system_ping::app::AppOptions::default(), Vec::new());
-    // The age is measured from the process start, so give that clock something to show. Without
-    // this a save in the first microseconds would still report "nothing saved yet".
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    // No warm-up sleep on purpose: this process may read the shared session clock for the very
+    // first time inside this save, and that first reading is allowed to be exactly 0.0. A save
+    // at the clock's own birth still has to count as a save — zero is a time, not "never".
 
     app.save_now();
 
